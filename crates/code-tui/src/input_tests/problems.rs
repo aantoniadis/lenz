@@ -107,7 +107,7 @@ fn inline_terminal_server_problem_uses_most_severe_message_once_after_wrapped_li
     let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_|"cargo".into()));
     build.args(["build","-q","-p","code-core","--example","fake_lsp"]); if profile.ends_with("release") {build.arg("--release");} assert!(build.status().unwrap().success());
     let cfg = config(dir.path()); std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
-    std::fs::write(&cfg.providers,serde_json::json!({"providers":{"rust-analyzer":{"executable":profile.join("examples/fake_lsp"),"env":{"FAKE_LSP_NO_DECOR":"1"}}}}).to_string()).unwrap();
+    std::fs::write(&cfg.providers,serde_json::json!({"providers":{"rust-analyzer":{"executable":profile.join("examples/fake_lsp"),"env":{"FAKE_LSP_NO_DECOR":"1"}}},"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string()).unwrap();
     let mut a = App::new(cfg,Some(root)); a.dispatch(Command::OpenRetained(path.clone()));
     settle(&mut a,|a|a.session.state().active().is_some_and(|t|a.session.state().inline_problem(t.id(),0).is_some_and(|p|p.other_count==1)));
     let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(220,20)).unwrap();terminal.draw(|f|a.draw(f)).unwrap();

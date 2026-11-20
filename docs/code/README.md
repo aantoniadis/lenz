@@ -419,6 +419,12 @@ Automatic suggestions stay closed after Enter and on empty or indentation-only l
 A snippet suggestion expands with the file's indentation and Tab then visits its placeholders until Escape, a caret move, another tab or Undo ends it
 ([snippets](../research/code-snippets.md)). Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
 provider settings live in `$XDG_CONFIG_HOME/lenz-code/providers.json`.
+Until you trust an opened folder, Lenz Code is in **Restricted** mode there and runs no code from it: language servers
+that run a project's code (its build scripts, its Bundler setup, its TypeScript plugins) and the project's own
+formatters stay off, while highlighting, search, Markdown, Git views and the other servers keep working. The first time
+one would start, one dialog asks whether you trust the folder's authors (Stay Restricted is the default); the answer is
+remembered, and the status bar's **Restricted** item opens the dialog again
+([folder trust](providers.md#project-tools-and-folder-trust)).
 Completion rows show their kinds, separate adjacent kind groups and emphasize matching text while preserving
 the server's ranking. Their documentation renders Markdown and syntax-highlighted code, with scrolling instead
 of a short truncated excerpt. Wheel over the documentation, or use Alt+PageUp/PageDown/Home/End, to read it;

@@ -18,7 +18,7 @@ fn snapshot_style_queries_keep_syntax_semantic_precedence_and_modifier_flags() {
     assert!(build.status().unwrap().success());
     let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
     let providers = dir.path().join("providers.json");
-    std::fs::write(&providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake}}}).to_string()).unwrap();
+    std::fs::write(&providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake}},"trusted":[std::fs::canonicalize(dir.path()).unwrap()]}).to_string()).unwrap();
     let mut s = Session::new(Config {
         themes: lenz_content::theme::ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-code"),
         recent: dir.path().join("recent.json"), settings: dir.path().join("settings.json"), providers,

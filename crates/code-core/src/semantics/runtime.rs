@@ -145,9 +145,13 @@ fn discover_node(current: Option<PathBuf>, path: Option<&std::ffi::OsStr>, homes
     paths
 }
 
-/// Bounded stdout and stderr, without shell startup files or a long-lived version process.
+/// Where a version is asked outside any project: the filesystem root, which only its administrator can write to, so
+/// that a version manager's shim (rustup, mise, pyenv) does not read a project's toolchain files to choose what runs.
+pub const NEUTRAL: &str = "/";
+
+/// Bounded stdout and stderr, without shell startup files or a long-lived version process; asked outside any project.
 pub fn version(path: &Path, flag: &str) -> Result<String, String> {
-    version_in(path, flag, &[], None)
+    version_in(path, flag, &[], Some(Path::new(NEUTRAL)))
 }
 
 pub fn version_in(path: &Path, flag: &str, env: &[(String, String)], cwd: Option<&Path>) -> Result<String, String> {

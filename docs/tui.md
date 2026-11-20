@@ -37,10 +37,19 @@ would change other files, create or delete files, or run a server command are li
 Undo step, and the project's format-on-save formats before Save writes; see the
 [terminal editor guide](code/tui.md) for what is refused and when Save writes nothing. Python files run the project's
 configured ruff or black instead (Pyright does not format), in both adapters alike; Server Details names the Python
-environment Pyright uses ([Pyright](code/providers.md#pyright-python)). A project's own programs (typescript-go's
-`node_modules/.bin/tsc`, a configured Python environment's interpreter and formatters) run only in an opened folder you
-trust with **Trust Project Tools in This Folder**, from the same Language Servers menu in both adapters
-([project tools](code/providers.md#project-tools-and-folder-trust)).
+environment Pyright uses ([Pyright](code/providers.md#pyright-python)).
+
+**Restricted mode** works alike in both adapters: until you trust an opened folder, Lenz Code runs no code from it.
+Language servers that run a project's code (rust-analyzer, typescript-language-server, Ruby LSP, JDT LS, Kotlin LSP,
+gopls) and the project's own programs (typescript-go's `node_modules/.bin/tsc`, a configured Python environment's
+interpreter and formatters, erb_lint, haml-lint) stay off with the status "Off until you trust this folder". The first
+time one of them would start in a folder never asked about, the shared folder-trust dialog asks once, naming the folder
+and what would run: **Stay Restricted** (Enter and Escape), **Trust** (Alt+T) or **Trust Parent Folder** (Alt+P, not
+offered for the file system root or the home folder); a click on a button works too, and no plain key trusts. The
+dialog takes every key before the editor, wraps and scrolls in a narrow terminal (Up/Down, Page keys, Home/End), and
+the answer is remembered. A **Restricted** item in the status bar (both adapters) and **Folder Trust…** in the
+Language Servers menu, F10 and Find Action open it again; **Trust Project Tools in This Folder** and **Stop Trusting
+Project Tools in This Folder** stay in the same menus ([folder trust](code/providers.md#project-tools-and-folder-trust)).
 
 The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
 line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.

@@ -12,7 +12,7 @@ use code_core::{
     search::ResultsKind,
     semantics::hierarchy::Direction,
     semantics::Status,
-    session::{Command, CommandId, Completion, Config, Selection, Session},
+    session::{Command, CommandId, Completion, Config, Selection, Session, TrustChoice},
 };
 use lenz_content::highlight::Capture;
 use serde_json::Value;
@@ -60,8 +60,18 @@ fn fixture_input(id: &str, env: &[(&str, &str)], files: &[(&str, &str)], setting
     fixture_ids(&[id], env, files, settings, clock, text_input)
 }
 
-/// As [`fixture_input`], with the fake standing in for every provider in `ids` (each its own server process).
+/// As [`fixture_input`], with the fake standing in for every provider in `ids` (each its own server process). The
+/// project's folder is trusted (its servers run the project's code).
 fn fixture_ids(ids: &[&str], env: &[(&str, &str)], files: &[(&str, &str)], settings: Value, clock: code_core::semantics::Clock, text_input: bool) -> Fixture {
+    fixture_trusting(ids, env, files, settings, clock, text_input, true)
+}
+
+/// As [`fixture_as`], in a folder the user has never been asked to trust (Restricted).
+fn untrusted_fixture(id: &str, files: &[(&str, &str)], settings: Value) -> Fixture {
+    fixture_trusting(&[id], &[], files, settings, std::sync::Arc::new(Instant::now), true, false)
+}
+
+fn fixture_trusting(ids: &[&str], env: &[(&str, &str)], files: &[(&str, &str)], settings: Value, clock: code_core::semantics::Clock, text_input: bool, trusted: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     write(&root, "Cargo.toml", "[package]\nname = \"proj\"\n");
@@ -89,19 +99,26 @@ fn fixture_ids(ids: &[&str], env: &[(&str, &str)], files: &[(&str, &str)], setti
     // Only the fake runs: every other provider is pointed nowhere.
     let mut all: serde_json::Map<String, Value> = code_core::semantics::provider::PROVIDERS.iter().map(|p| (p.id.to_string(), serde_json::json!({ "executable": format!("/nonexistent/{}", p.id) }))).collect();
     for id in ids { all.insert((*id).into(), ra.clone()); }
-    std::fs::write(&providers, serde_json::json!({ "providers": all }).to_string()).unwrap();
-    let s = Session::with_text_input(Config {
-        themes: ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-code"),
-        recent: dir.path().join("state/recent-roots.json"),
-        settings: dir.path().join("state/settings.json"),
-        providers,
-        cache: dir.path().join("cache"),
+    // The folder holding the project and its neighbours (dependencies, other projects) the tests open.
+    let trusted: Vec<PathBuf> = if trusted { vec![std::fs::canonicalize(dir.path()).unwrap()] } else { Vec::new() };
+    std::fs::write(&providers, serde_json::json!({ "providers": all, "trusted": trusted }).to_string()).unwrap();
+    let s = session_in(dir.path(), clock, text_input);
+    Fixture { _dir: dir, root, log, s }
+}
+
+/// A session over the fixture folder `dir`'s configuration (as after a restart).
+fn session_in(dir: &Path, clock: code_core::semantics::Clock, text_input: bool) -> Session {
+    Session::with_text_input(Config {
+        themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-code"),
+        recent: dir.join("state/recent-roots.json"),
+        settings: dir.join("state/settings.json"),
+        providers: dir.join("config/providers.json"),
+        cache: dir.join("cache"),
         idle: code_core::semantics::IDLE,
         clock,
         overrides: ThemeOverrides::default(),
         dark: true,
-    }, text_input);
-    Fixture { _dir: dir, root, log, s }
+    }, text_input)
 }
 
 /// The fake server: the `fake_lsp` example, built (once per test run; a no-op when fresh) next to this test's
@@ -543,7 +560,7 @@ fn missing_unsupported_failed_empty_and_virtual_answers_are_distinct() {
     // Not installed: setup guidance, and the commands say why they cannot run.
     let mut f = fixture(&[], &[("src/main.rs", MAIN)]);
     let providers = f.root.parent().unwrap().join("config/providers.json");
-    std::fs::write(&providers, r#"{"providers":{"rust-analyzer":{"executable":"/nonexistent/rust-analyzer"}}}"#).unwrap();
+    std::fs::write(&providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": "/nonexistent/rust-analyzer" } }, "trusted": [std::fs::canonicalize(&f.root).unwrap()] }).to_string()).unwrap();
     let mut m = Session::new(Config {
         themes: ThemePaths::under(&f.root.join("../c2"), &f.root.join("../s2"), "lenz-code"),
         recent: f.root.join("../s2/recent.json"),
@@ -1414,7 +1431,7 @@ fn launch_overrides_settings_and_configuration_are_the_users() {
     // An executable the launch's own PATH lacks: explained, without reading shell startup files.
     let mut g = fixture_with(&[], &[("src/main.rs", USES)], serde_json::json!({ "env": { "PATH": "/nonexistent" } }), std::sync::Arc::new(Instant::now));
     let providers = g.root.parent().unwrap().join("config/providers.json");
-    std::fs::write(&providers, r#"{"providers":{"rust-analyzer":{"executable":"rust-analyzer","env":{"PATH":"/nonexistent"}}}}"#).unwrap();
+    std::fs::write(&providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": "rust-analyzer", "env": { "PATH": "/nonexistent" } } }, "trusted": [std::fs::canonicalize(&g.root).unwrap()] }).to_string()).unwrap();
     g.s = Session::new(Config {
         themes: ThemePaths::under(&g.root.join("../c3"), &g.root.join("../s3"), "lenz-code"),
         recent: g.root.join("../s3/recent.json"),
@@ -2642,6 +2659,275 @@ fn a_typescript_7_project_is_served_by_typescript_go_from_its_own_tsc() {
     f.settle(|s| s.state().servers().iter().all(|v| v.name != "typescript-go"));
 }
 
+/// The servers that run a project's code (its build, its Gemfile, its TypeScript and plugins), one fixture each: the
+/// provider, the file opened and the project files beside it.
+/// A gated provider's fixture: its id, the file opened and the project files.
+type GatedFixture = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
+const GATED: [GatedFixture; 6] = [
+    ("rust-analyzer", "src/main.rs", &[("src/main.rs", "fn main() {}\n")]),
+    ("typescript-language-server", "src/a.ts", &[("package.json", "{}\n"), ("src/a.ts", "export const a = 1;\n")]),
+    ("ruby-lsp", "lib/a.rb", &[("Gemfile", "source \"https://rubygems.org\"\n"), ("lib/a.rb", "class A; end\n")]),
+    ("jdtls", "src/Main.java", &[("pom.xml", "<project/>\n"), ("src/Main.java", "class Main {}\n")]),
+    ("kotlin-lsp", "src/Main.kt", &[("build.gradle.kts", "\n"), ("src/Main.kt", "class Main\n")]),
+    ("gopls", "main.go", &[("go.mod", "module m\n"), ("main.go", "package main\n")]),
+];
+
+/// `id`'s fixture whose every program (the server, and the `bundle` beside it that Ruby LSP composes its bundle with)
+/// leaves `marker` when it runs.
+fn marked_fixture(id: &str, files: &[(&str, &str)]) -> (Fixture, PathBuf) {
+    let f = untrusted_fixture(id, files, serde_json::json!({}));
+    let marker = f._dir.path().join("project-code-ran");
+    let fake = f._dir.path().join("fake-server");
+    let text = std::fs::read_to_string(&fake).unwrap();
+    std::fs::write(&fake, text.replacen("#!/bin/sh\n", &format!("#!/bin/sh\ntouch '{}'\n", marker.display()), 1)).unwrap();
+    script(&f._dir.path().join("bundle"), &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+    (f, marker)
+}
+
+/// Restricted: in an opened folder the user has not trusted, no server that runs the project's code starts, and
+/// nothing it would run (its version probe, Ruby LSP's `bundle lock`) runs either.
+#[test]
+fn an_untrusted_folder_starts_no_server_that_runs_project_code() {
+    let mut ran = Vec::new();
+    for (id, file, files) in GATED {
+        let (mut f, marker) = marked_fixture(id, files);
+        f.s.dispatch(Command::OpenRoot(f.root.clone()));
+        f.settle(|s| s.state().project().is_some());
+        f.s.dispatch(Command::Open(f.root.join(file)));
+        f.settle(|s| s.state().provider().is_some_and(|v| v.root.is_some() && !matches!(v.status, Status::Queued | Status::Starting)));
+        if marker.exists() { ran.push((id, f.s.state().provider().map(|v| v.status))); }
+    }
+    assert!(ran.is_empty(), "ran in a folder that is not trusted: {ran:?}");
+}
+
+/// The status a server held back in Restricted mode shows.
+fn restricted(s: &Session) -> bool {
+    s.state().provider().is_some_and(|v| matches!(v.status, Status::Restricted(_)))
+}
+
+/// Restricted mode end to end, for each server that runs a project's code: held back with its status saying so, one
+/// dialog naming what would run, Trust starts it without reopening anything, and Stop Trusting stops it again and is
+/// remembered (declined), so it is not asked about again.
+#[test]
+fn trusting_a_restricted_folder_starts_what_was_held_back_and_stop_trusting_stops_it() {
+    for (id, file, files) in GATED {
+        let (mut f, marker) = marked_fixture(id, files);
+        f.s.dispatch(Command::OpenRoot(f.root.clone()));
+        f.settle(|s| s.state().project().is_some());
+        assert_eq!(f.s.restricted_label(), Some("Restricted"), "{id}");
+        f.s.dispatch(Command::Open(f.root.join(file)));
+        f.settle(restricted);
+        let view = f.s.state().provider().unwrap();
+        assert_eq!(view.status_label(), "LSP off until trusted");
+        assert!(view.summary().contains("off until you trust this folder"), "{}", view.summary());
+        let runs = code_core::semantics::provider::PROVIDERS.iter().find(|p| p.id == id).unwrap().runs;
+        assert!(!runs.is_empty());
+        let text = f.s.trust_text().unwrap_or_default();
+        assert!(text.contains(runs) && text.contains(&f.root.display().to_string()), "{id}: {text}");
+        assert_eq!(f.s.trust_choices().first().map(|c| c.1), Some(TrustChoice::StayRestricted), "the default first");
+        assert!(f.s.language_server_details().contains("Off until you trust this folder"), "{id}");
+        assert!(!marker.exists(), "{id} ran before the folder was trusted");
+        // Trust: what was held back starts, with nothing reopened.
+        f.s.dispatch(Command::TrustChoice(TrustChoice::Trust));
+        assert!(f.s.trust_text().is_none());
+        f.settle(ready);
+        assert!(marker.exists(), "{id} did not start once trusted");
+        assert_eq!(f.s.restricted_label(), None);
+        // Stop trusting: it stops (Restricted again) and the folder is declined, never asked about again.
+        std::fs::remove_file(&marker).unwrap();
+        f.s.dispatch(Command::SetProjectToolsTrusted(false));
+        f.settle(restricted);
+        assert!(f.s.trust_text().is_none(), "{id}: a declined folder is not asked about");
+        assert_eq!(f.s.restricted_label(), Some("Restricted"));
+        assert!(!marker.exists(), "{id} started in a folder that is no longer trusted");
+        let providers = f._dir.path().join("config/providers.json");
+        let real = std::fs::canonicalize(&f.root).unwrap();
+        f.settle_until(|| std::fs::read(&providers).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).is_some_and(|v| v["declined"] == serde_json::json!([real])));
+    }
+}
+
+/// One dialog per folder, whatever holds back: two servers and a formatter add what they would run to the dialog
+/// already open. Stay Restricted is remembered: after a restart (the settings read again) nothing asks, and the
+/// servers stay off.
+#[test]
+fn one_dialog_asks_once_per_folder_and_staying_restricted_survives_a_restart() {
+    let files = [("src/main.rs", "fn main() {}\n"), ("go.mod", "module m\n"), ("main.go", "package main\n"), (".erb_lint.yml", "linters: {}\n"), ("a.html.erb", "<p><%= 1 %></p>\n")];
+    let mut f = fixture_trusting(&["rust-analyzer", "gopls"], &[], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now), true, false);
+    let marker = f._dir.path().join("erb-lint-ran");
+    script(&f.root.join("bin/erb_lint"), &format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    assert!(f.s.trust_text().is_none(), "opening a folder runs nothing, so asks nothing");
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(|s| restricted(s) && s.trust_text().is_some());
+    f.s.dispatch(Command::Open(f.root.join("main.go")));
+    f.settle(|s| restricted(s) && s.trust_text().is_some_and(|t| t.contains("gopls would run")));
+    f.s.dispatch(Command::Open(f.root.join("a.html.erb")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.html.erb")));
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Format Document:")));
+    assert!(f.notice("Format Document: Off until you trust this folder (erb_lint would run"), "{:?}", f.s.state().notices());
+    assert!(!marker.exists(), "erb_lint ran before the folder was trusted");
+    let text = f.s.trust_text().unwrap();
+    assert!(text.contains("rust-analyzer would run") && text.contains("gopls would run") && text.contains("erb_lint would run"), "{text}");
+    f.s.dispatch(Command::TrustChoice(TrustChoice::StayRestricted));
+    assert!(f.s.trust_text().is_none());
+    // Asked once: holding back again asks nothing.
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(restricted);
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    assert!(f.s.trust_text().is_none());
+    // Restarted: still declined, nothing asks, nothing runs.
+    let providers = f._dir.path().join("config/providers.json");
+    f.settle_until(|| std::fs::read_to_string(&providers).is_ok_and(|t| t.contains("declined")));
+    f.s = session_in(f._dir.path(), std::sync::Arc::new(Instant::now), true);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    assert_eq!(f.s.folder_trust(), Some(code_core::semantics::provider::Trust::Declined));
+    f.s.dispatch(Command::Open(f.root.join("main.go")));
+    f.settle(restricted);
+    assert!(f.s.trust_text().is_none(), "a declined folder is not asked about after a restart");
+    // The Restricted item (Folder Trust…) still opens the dialog, and Trust then starts the server.
+    f.s.dispatch(Command::OpenFolderTrust);
+    assert!(f.s.trust_text().is_some_and(|t| t.contains("You chose to keep it restricted")));
+    f.s.dispatch(Command::TrustChoice(TrustChoice::Trust));
+    f.settle(ready);
+    // Trusted, the project's erb_lint runs.
+    f.s.dispatch(Command::Open(f.root.join("a.html.erb")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.html.erb")));
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.settle_until(|| marker.exists());
+}
+
+/// A dialog or a held-back server's report about a folder no longer open does not ask about the next one, and with
+/// no folder open nothing asks (a file outside every trusted folder stays restricted).
+#[test]
+fn trust_is_asked_only_about_the_open_folder() {
+    let (mut f, marker) = marked_fixture("rust-analyzer", GATED[0].2);
+    let other = f._dir.path().join("other");
+    write(&other, "README.md", "# other\n");
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    // The held-back server's report is kept back until the next folder has opened: arriving late, it does not ask
+    // about that folder.
+    let rx = f.s.completions();
+    let until = Instant::now() + Duration::from_secs(15);
+    let late = loop {
+        assert!(Instant::now() < until, "no report from the held-back server");
+        match recv(&rx) {
+            Ok(c @ Completion::Semantic(code_core::semantics::Event::Restricted { .. })) => break c,
+            Ok(c) => { f.s.dispatch(c); }
+            Err(()) => {}
+        }
+    };
+    assert!(f.s.trust_text().is_none());
+    f.s.dispatch(Command::OpenRoot(other.clone()));
+    f.settle(|s| s.state().project().is_some_and(|p| p.root() == other));
+    f.s.dispatch(late);
+    assert!(f.s.trust_text().is_none(), "a report about the previous folder asked about this one");
+    assert_eq!(f.s.folder_trust(), Some(code_core::semantics::provider::Trust::Unasked));
+    // A dialog open for the previous folder does not stay for the next one.
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some_and(|p| p.root() != other));
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(|s| s.trust_text().is_some());
+    f.s.dispatch(Command::OpenRoot(other.clone()));
+    f.settle(|s| s.state().project().is_some_and(|p| p.root() == other));
+    assert!(f.s.trust_text().is_none(), "the previous folder's dialog stayed open");
+    f.s.dispatch(Command::Open(other.join("README.md")));
+    f.settle(|s| s.state().current_source().is_some());
+    assert!(f.s.trust_text().is_none(), "a folder where nothing is held back is not asked about");
+    // No folder open: a project file alone stays restricted (Cargo.toml beside it), and nothing asks.
+    let (mut f, marker2) = marked_fixture("rust-analyzer", &[("main.rs", "fn main() {}\n")]);
+    f.s.dispatch(Command::Open(f.root.join("main.rs")));
+    f.settle(restricted);
+    assert!(f.s.trust_text().is_none() && f.s.restricted_label().is_none());
+    f.s.dispatch(Command::OpenFolderTrust);
+    assert!(f.s.trust_text().is_none(), "Folder Trust… needs an open folder");
+    assert_eq!(f.s.disabled(CommandId::FolderTrust), Some("No folder is open: open the project's folder to trust its tools"));
+    assert!(!marker.exists() && !marker2.exists());
+}
+
+/// Trust Parent Folder trusts the folder holding the open one, and every folder in it: another project there is
+/// trusted too. Stop Trusting in a folder inside it keeps just that folder restricted.
+#[test]
+fn trust_parent_folder_trusts_the_folders_beside_the_open_one() {
+    let (mut f, marker) = marked_fixture("rust-analyzer", GATED[0].2);
+    let sibling = f._dir.path().join("sibling");
+    write(&sibling, "Cargo.toml", "[package]\nname = \"s\"\n");
+    write(&sibling, "src/main.rs", "fn main() {}\n");
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(|s| s.trust_text().is_some());
+    let parent = std::fs::canonicalize(f._dir.path()).unwrap();
+    assert!(f.s.trust_text().unwrap().contains(&format!("Trust Parent Folder trusts {}", parent.display())));
+    assert_eq!(f.s.trust_choices().into_iter().map(|c| c.1).collect::<Vec<_>>(), [TrustChoice::StayRestricted, TrustChoice::Trust, TrustChoice::TrustParent]);
+    f.s.dispatch(Command::TrustChoice(TrustChoice::TrustParent));
+    f.settle(ready);
+    assert!(marker.exists());
+    f.s.dispatch(Command::OpenRoot(sibling.clone()));
+    f.settle(|s| s.state().project().is_some_and(|p| p.root() == sibling));
+    assert_eq!(f.s.folder_trust(), Some(code_core::semantics::provider::Trust::Trusted));
+    f.s.dispatch(Command::Open(sibling.join("src/main.rs")));
+    f.settle(ready);
+    f.s.dispatch(Command::SetProjectToolsTrusted(false));
+    f.settle(restricted);
+    assert_eq!(f.s.folder_trust(), Some(code_core::semantics::provider::Trust::Declined), "the folder inside the trusted one");
+}
+
+/// Restricted: Format Document on a template does not run the project's erb_lint binstub (it loads the project's
+/// linters) in a folder the user has not trusted.
+#[test]
+fn an_untrusted_folder_does_not_run_the_projects_erb_lint() {
+    let files = [(".erb_lint.yml", "linters: {}\n"), ("app/views/a.html.erb", "<p><%= 1 %></p>\n")];
+    let mut f = untrusted_fixture("ruby-lsp", &files, serde_json::json!({ "executable": "/nonexistent/ruby-lsp" }));
+    let marker = f._dir.path().join("erb-lint-ran");
+    script(&f.root.join("bin/erb_lint"), &format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::Open(f.root.join("app/views/a.html.erb")));
+    f.settle(|s| s.state().current_source().is_some());
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Format Document:")));
+    assert!(!marker.exists(), "the project's erb_lint ran in a folder that is not trusted: {:?}", f.s.state().notices());
+}
+
+/// A trusted folder bounds where a lone file's project is looked for, but is not opened by it: a file with no project
+/// file between it and the trusted folder holding it has its own folder as its workspace, never the trusted folder
+/// (which may hold many checkouts).
+#[test]
+fn a_lone_file_in_a_trusted_folder_is_not_served_as_the_whole_folder() {
+    for (id, file) in [("pyright", "a/b/x.py"), ("yaml-language-server", "a/b/x.yaml"), ("typescript-language-server", "a/b/x.ts")] {
+        let mut f = fixture_as(id, &[], &[(file, "x = 1\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+        std::fs::remove_file(f.root.join("Cargo.toml")).unwrap();
+        f.s.dispatch(Command::Open(f.root.join(file)));
+        f.settle(|s| s.state().provider().is_some_and(|v| v.root.is_some()));
+        assert_eq!(f.s.state().provider().and_then(|v| v.root), Some(f.root.join("a/b")), "{id}");
+    }
+}
+
+/// Workspace discovery stops at the opened folder: a Cargo workspace or a `go.work` above it is not the project's,
+/// even in a trusted folder (its server would build what is above).
+#[test]
+fn workspaces_above_the_opened_folder_are_not_used() {
+    for (id, file, files) in [
+        ("rust-analyzer", "crate/src/main.rs", &[("Cargo.toml", "[workspace]\nmembers = [\"crate\"]\n"), ("crate/Cargo.toml", "[package]\nname = \"c\"\n"), ("crate/src/main.rs", "fn main() {}\n")][..]),
+        ("gopls", "crate/main.go", &[("go.work", "go 1.22\n"), ("crate/go.mod", "module m\n"), ("crate/main.go", "package main\n")][..]),
+    ] {
+        let mut f = fixture_as(id, &[], files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+        let folder = f.root.join("crate");
+        f.s.dispatch(Command::OpenRoot(folder.clone()));
+        f.settle(|s| s.state().project().is_some());
+        f.s.dispatch(Command::SetProjectToolsTrusted(true));
+        f.settle(|s| s.disabled(CommandId::UntrustProjectTools).is_none());
+        f.s.dispatch(Command::Open(f.root.join(file)));
+        f.settle(|s| s.state().provider().is_some_and(|v| v.root.is_some()));
+        assert_eq!(f.s.state().provider().and_then(|v| v.root), Some(folder), "{id}");
+    }
+}
+
 /// A project's own `tsc` is the project's program. Opened alone, or in a folder that is not trusted, it never runs: its
 /// server says why and how to trust the folder. Trusting the folder runs it and is kept, privately, in providers.json
 /// outside the checkout; stopping trusting stops it. A `tsc` above the trusted folder is never searched for.
@@ -2653,15 +2939,15 @@ fn a_project_tsc_runs_only_in_a_trusted_folder() {
     let untrusted = |s: &Session| s.state().provider().is_some_and(|v| v.name == "typescript-go" && matches!(&v.status, Status::Missing(why) if why.contains("is the project's program")));
     // The project's tsc leaves a marker, then serves as the fake.
     let fixture = || {
-        let f = fixture_as("typescript-go", &[], &files, settings.clone(), std::sync::Arc::new(Instant::now));
+        let f = untrusted_fixture("typescript-go", &files, settings.clone());
         let marker = f._dir.path().join("tsc-ran");
         script(&f.root.join("node_modules/.bin/tsc"), &format!("#!/bin/sh\n: > '{}'\nexec '{}' \"$@\"\n", marker.display(), f._dir.path().join("fake-server").display()));
         (f, marker)
     };
-    // Opened alone (no folder): nothing to trust, and nothing runs.
+    // Opened alone (no folder): nothing to trust, nothing above the file's folder is its project, and nothing runs.
     let (mut f, marker) = fixture();
     f.s.dispatch(Command::Open(f.root.join("src/a.ts")));
-    f.settle(untrusted);
+    f.settle(|s| s.state().provider().is_some_and(|v| v.root.is_some() && !matches!(v.status, Status::Queued | Status::Starting)));
     assert_eq!(f.s.disabled(CommandId::TrustProjectTools), Some("No folder is open: open the project's folder to trust its tools"));
     assert!(!marker.exists(), "an untrusted project's tsc ran");
     // The folder open, not trusted: still nothing, and the command offers to trust it.
@@ -2671,8 +2957,10 @@ fn a_project_tsc_runs_only_in_a_trusted_folder() {
     f.s.dispatch(Command::OpenRoot(f.root.clone()));
     f.settle(|s| s.state().project().is_some());
     f.s.dispatch(Command::Open(f.root.join("src/a.ts")));
-    f.settle(untrusted);
+    f.settle(|s| untrusted(s) && s.trust_text().is_some());
     assert!(!marker.exists(), "an untrusted folder's tsc ran");
+    // typescript-go itself runs (no tsc on PATH here), and the dialog says what trusting would run.
+    assert!(f.s.trust_text().unwrap().contains("typescript-go would run this project's own TypeScript compiler"), "{:?}", f.s.trust_text());
     assert_eq!(f.s.disabled(CommandId::UntrustProjectTools), Some("This folder's project tools are not trusted"));
     assert!(f.s.language_server_rows().iter().any(|(_, id)| *id == Some(CommandId::TrustProjectTools)));
     // Trusted: its tsc serves, and the trust is saved privately.
@@ -2713,7 +3001,7 @@ fn a_project_tsc_runs_only_in_a_trusted_folder() {
 #[test]
 fn a_project_python_interpreter_runs_only_in_a_trusted_folder() {
     let files = [("pyrightconfig.json", "{ \"venvPath\": \".\", \"venv\": \"env\" }"), ("env/lib/python3.12/site-packages/.keep", ""), ("app.py", "x = 1\n")];
-    let mut f = fixture_as("pyright", &[], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    let mut f = untrusted_fixture("pyright", &files, serde_json::json!({}));
     let marker = f._dir.path().join("python-ran");
     script(&f.root.join("env/bin/python"), &format!("#!/bin/sh\ntouch '{}'\necho 'Python 3.12.0'\n", marker.display()));
     f.s.dispatch(Command::OpenRoot(f.root.clone()));
@@ -2743,6 +3031,48 @@ fn python_formatting_runs_the_projects_ruff_only_in_a_trusted_folder() {
         assert!(f.notice("Trust Project Tools in This Folder"), "{:?}", f.s.state().notices());
         assert_eq!(current_text(f.s.state()), "x  =  1\n");
     }
+}
+
+/// Gap B1: an environment the project configures outside the opened folder (a venvPath of `..`) is not the project's
+/// own: its ruff is never run, even in a trusted folder.
+#[test]
+fn python_formatting_never_runs_an_environment_outside_the_opened_folder() {
+    let files = [("pyrightconfig.json", "{ \"venvPath\": \"..\", \"venv\": \"outside\" }"), ("pyproject.toml", "[project]\nname = \"p\"\n\n[tool.ruff]\nline-length = 60\n"), ("app.py", "x  =  1\n")];
+    let mut f = fixture_input("pyright", &[], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now), true);
+    let outside = f._dir.path().join("outside");
+    write(&outside, "pyvenv.cfg", "version = 3.13.5\n");
+    write(&outside, "lib/python3.13/site-packages/.keep", "");
+    script(&outside.join("bin/ruff"), FAKE_RUFF);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| s.folder_trust() == Some(code_core::semantics::provider::Trust::Trusted));
+    f.open("app.py");
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Format Document:")));
+    assert!(!outside.join("bin/ruff.args").exists(), "an environment outside the opened folder ran: {:?}", f.s.state().notices());
+}
+
+/// Pyright itself runs the interpreter its settings name: in a folder that is not trusted, a relative pythonPath (a
+/// file of the project) is not given to it, in its initialization or its configuration; trusted, it is.
+#[test]
+fn pyright_is_not_given_a_projects_interpreter_in_a_folder_that_is_not_trusted() {
+    let files = [("app.py", "x = 1\n")];
+    let mut f = untrusted_fixture("pyright", &files, serde_json::json!({ "settings": { "pythonPath": "env/bin/python" } }));
+    let marker = f._dir.path().join("python-ran");
+    script(&f.root.join("env/bin/python"), &format!("#!/bin/sh\ntouch '{}'\necho 'Python 3.12.0'\n", marker.display()));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.open("app.py");
+    let initialized = |log: &Path| messages(log).into_iter().filter(|m| m["method"] == "initialize").map(|m| m["params"]["initializationOptions"].clone()).collect::<Vec<_>>();
+    assert_eq!(initialized(&f.log).last().map(|o| o.get("pythonPath").is_none()), Some(true), "{:?}", initialized(&f.log));
+    assert!(f.s.trust_text().is_none(), "Pyright runs in Restricted mode: nothing is held back, nothing asks");
+    assert!(!marker.exists());
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| ready(s) && s.folder_trust() == Some(code_core::semantics::provider::Trust::Trusted));
+    let log = f.log.clone();
+    f.settle_until(move || initialized(&log).len() == 2);
+    assert_eq!(initialized(&f.log).last().and_then(|o| o.get("pythonPath").cloned()), Some(serde_json::json!("env/bin/python")));
 }
 
 #[test]

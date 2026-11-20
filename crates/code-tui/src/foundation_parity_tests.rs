@@ -25,7 +25,7 @@ fn config(base: &Path, dark: bool) -> Config {
             )
         })
         .collect();
-    std::fs::write(&providers, serde_json::json!({"providers":ids}).to_string()).unwrap();
+    std::fs::write(&providers, serde_json::json!({"providers":ids,"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string()).unwrap();
     Config {
         themes: lenz_content::theme::ThemePaths::under(
             &base.join("config"),

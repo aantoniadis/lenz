@@ -74,6 +74,9 @@ pub use explorer_search::{ExplorerSearch, ExplorerSearchInput};
 mod explorer_history;
 #[path = "session/delete.rs"]
 mod delete_work;
+#[path = "session/trust.rs"]
+mod trust_work;
+pub use trust_work::{TrustChoice, TITLE as TRUST_TITLE};
 #[path = "session/recovery.rs"]
 mod recovery_work;
 #[path = "session/reconcile.rs"]
@@ -564,9 +567,14 @@ pub enum Command {
     RestartServer,
     /// Turn the active file's language server off (or on) for the browsing root, remembered.
     SetServerEnabled(bool),
-    /// Trust (or stop trusting) the browsing root's project tools, remembered: the project's own programs
-    /// (typescript-go's node_modules/.bin/tsc, a configured Python environment's interpreter) may run.
+    /// Trust the browsing root's project tools (or stop trusting them: keep it restricted), remembered: servers that
+    /// run the project's code and the project's own programs (typescript-go's node_modules/.bin/tsc, a configured
+    /// Python environment's interpreter) may run.
     SetProjectToolsTrusted(bool),
+    /// Open the folder-trust dialog for the open folder.
+    OpenFolderTrust,
+    /// The folder-trust dialog's answer.
+    TrustChoice(TrustChoice),
     OpenServerInstall,
     StartServerInstall,
     CancelServerInstall,
@@ -896,6 +904,8 @@ pub enum CommandId {
     EnableServer,
     TrustProjectTools,
     UntrustProjectTools,
+    /// Open the folder-trust dialog (also the status bar's Restricted item).
+    FolderTrust,
     ImageSource,
     MarkdownSource,
     /// The Markdown preview in the other pane, beside the source it follows.
@@ -1009,7 +1019,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 265] = [
+    pub const ALL: [CommandId; 266] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -1182,6 +1192,7 @@ impl CommandId {
         Self::EnableServer,
         Self::TrustProjectTools,
         Self::UntrustProjectTools,
+        Self::FolderTrust,
         Self::CsvTable, Self::CsvHeader, Self::CsvFilter, Self::CsvSort, Self::CsvClearFilter, Self::CsvMoveLeft, Self::CsvMoveRight, Self::CsvDropColumn, Self::CsvEditCell,
         Self::ImageSource,
         Self::MarkdownSource,
@@ -1493,6 +1504,7 @@ impl CommandId {
             Self::EnableServer => "Enable Language Server for This Folder",
             Self::TrustProjectTools => "Trust Project Tools in This Folder",
             Self::UntrustProjectTools => "Stop Trusting Project Tools in This Folder",
+            Self::FolderTrust => "Folder Trust…",
             Self::ImageSource => "Image Source / Rendered",
             Self::MarkdownSource => "Markdown Source / Preview",
             Self::PreviewBeside => "Open Markdown Preview to the Side",
@@ -1944,6 +1956,8 @@ pub struct State {
     /// The running checkout's request, the refused one's dialog, and the files a Smart Checkout left in conflict.
     pub(crate) checkout_running: Option<u64>,
     pub(crate) checkout_problem: Option<crate::branches::CheckoutProblem>,
+    /// The folder-trust dialog, while it is open.
+    pub(crate) trust_prompt: Option<trust_work::TrustPrompt>,
     pub(crate) stash_conflicts: Option<Vec<String>>,
     /// Files whose recovered drafts wait for Restore or Discard: their disk version is not edited meanwhile.
     pub(crate) undecided_recovery: Vec<PathBuf>,
@@ -3140,6 +3154,10 @@ pub struct Session {
     /// The home trash deletions go to (none: only a mount's own trash), and what this session put there, last last.
     trash_home: Option<PathBuf>,
     trashed: Vec<crate::trash::Trashed>,
+    /// The open folder with its links resolved, which folder trust is decided on.
+    project_real: Option<PathBuf>,
+    /// The home folder, for which Trust Parent Folder is never offered.
+    home: Option<PathBuf>,
     watcher: Watcher,
     /// The project's folders to watch, for its root, walk and size (built once per inventory), and the tabs' folders
     /// outside them that were last added.
@@ -3363,6 +3381,7 @@ impl Session {
                 tree_marks: Vec::new(),
                 checkout_running: None,
                 checkout_problem: None,
+                trust_prompt: None,
                 stash_conflicts: None,
                 undecided_recovery: recovery.undecided_paths(),
             },
@@ -3436,6 +3455,8 @@ impl Session {
             interrupted: false,
             trash_home: crate::trash::home_trash(),
             trashed: Vec::new(),
+            project_real: None,
+            home: std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()),
             watcher,
             watching: None,
             inventory_folders: None,
@@ -3607,7 +3628,7 @@ impl Session {
         if self.csv_pending() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
         if (self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || self.install_running.is_some()) && matches!(id,
             CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
-            | CommandId::TrustProjectTools | CommandId::UntrustProjectTools
+            | CommandId::TrustProjectTools | CommandId::UntrustProjectTools | CommandId::FolderTrust
             | CommandId::RestartServer | CommandId::RebuildIndex | CommandId::ExcludeRubyTooling | CommandId::ResetProjectServerSettings) {
             return Some(if self.install_running.is_some() { "Waiting for the current installation to finish or stop" } else { "Waiting for language server settings to finish saving" });
         }
@@ -3882,10 +3903,10 @@ impl Session {
                 }
                 _ => None,
             },
-            CommandId::TrustProjectTools | CommandId::UntrustProjectTools => match self.state.project.as_ref() {
+            CommandId::TrustProjectTools | CommandId::UntrustProjectTools | CommandId::FolderTrust => match self.folder_trust() {
                 None => Some("No folder is open: open the project's folder to trust its tools"),
-                Some(p) if self.state.semantics.settings().trusted.contains(p.root()) == (id == CommandId::TrustProjectTools) => {
-                    Some(if id == CommandId::TrustProjectTools { "This folder's project tools are already trusted" } else { "This folder's project tools are not trusted" })
+                Some(trust) if (trust == semantics::provider::Trust::Trusted) == (id != CommandId::UntrustProjectTools) => {
+                    Some(if id == CommandId::UntrustProjectTools { "This folder's project tools are not trusted" } else { "This folder's project tools are already trusted" })
                 }
                 _ => None,
             },
@@ -3991,7 +4012,7 @@ impl Session {
                 CommandId::DisableServer
             },
             CommandId::WorkspaceRoot,
-            if self.state.project.as_ref().is_some_and(|p| self.state.semantics.settings().trusted.contains(p.root())) {
+            if self.folder_trust() == Some(semantics::provider::Trust::Trusted) {
                 CommandId::UntrustProjectTools
             } else {
                 CommandId::TrustProjectTools
@@ -4044,7 +4065,7 @@ impl Session {
             return rows.join("\n");
         }
         if crate::template::Kind::of(&file) == Some(crate::template::Kind::Haml) {
-            rows.push("Formatter: Ruby's installed haml_lint, enabled by .haml-lint.yml in the file's ancestors; safe autocorrections through stdin, never writes the file; Ruby with haml_lint must be on PATH".into());
+            rows.push("Formatter: Ruby's installed haml_lint, enabled by .haml-lint.yml in the file's folder or above it, never above the opened folder; it runs only in a folder you trust (it loads the project's bundle and RuboCop configuration); safe autocorrections through stdin, never writes the file; Ruby with haml_lint must be on PATH".into());
             return rows.join("\n");
         }
         let path = std::env::var_os("PATH");
@@ -4237,6 +4258,7 @@ impl Session {
                 }
                 match v.status {
                     semantics::Status::Disabled => rows.push("Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into()),
+                    semantics::Status::Restricted(runs) => rows.push(format!("{}: {runs}. Lenz runs no code from a folder until you trust it: choose Restricted in the status bar, Folder Trust… or Trust Project Tools in This Folder.", semantics::provider::RESTRICTED)),
                     semantics::Status::Missing(_) if self.state.current_source().is_some_and(|d| d.is_large()) => rows.push("Large files do not start a language server. Open a smaller source file to use semantic navigation.".into()),
                     semantics::Status::Missing(_) if unmapped => {}
                     semantics::Status::Missing(_) if !has_root => rows.push("No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into()),
@@ -6155,12 +6177,14 @@ impl Session {
             }
             Command::SetProjectToolsTrusted(trusted) => {
                 if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
-                let Some(browse) = self.state.project.as_ref().map(|p| p.root().to_owned()) else { return Effect::default() };
-                self.state.asking = None;
-                self.cancel_semantic_analysis();
-                let settings = self.state.semantics.set_trusted(browse, trusted);
-                self.save_provider_settings(settings);
-                self.synced = 0;
+                let Some(real) = self.project_real.clone() else { return Effect::default() };
+                self.state.trust_prompt = None;
+                self.set_folder_trust(real, trusted)
+            }
+            Command::TrustChoice(choice) => self.choose_trust(choice),
+            Command::OpenFolderTrust => {
+                if self.disabled(CommandId::FolderTrust).is_some() { return Effect::default(); }
+                if self.state.trust_prompt.is_none() { self.open_trust_prompt(None); }
                 repaint
             }
             Command::CancelSemantic => {
@@ -6716,9 +6740,14 @@ impl Session {
         let mut resolve = |provider: usize, dir: PathBuf, file: PathBuf, over: Option<PathBuf>, settings: semantics::provider::Settings| {
             let (tx, browse) = (tx.clone(), browse.clone());
             jobs.submit(Priority::Background, move || {
-                let root = over.or_else(|| (semantics::provider::PROVIDERS[provider].root)(&file, browse.as_deref()));
-                let serve = root.as_deref().map_or(provider, |r| semantics::provider::serving(provider, r, &settings, browse.as_deref()));
-                let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir, root, serve }));
+                // No lookup above the opened folder (else the trusted folder holding the file, else its own folder).
+                let within = semantics::provider::lookup_bound(&file, browse.as_deref(), &settings);
+                let root = over.or_else(|| (semantics::provider::PROVIDERS[provider].root)(&file, browse.as_deref(), within.as_deref()));
+                // Trust is decided on the root with its links resolved.
+                let real = root.as_deref().and_then(|r| std::fs::canonicalize(r).ok());
+                let trusted = real.as_deref().is_some_and(|r| settings.trust(r) == semantics::provider::Trust::Trusted);
+                let serve = root.as_deref().map_or(provider, |r| semantics::provider::serving(provider, r, &settings, within.as_deref(), trusted));
+                let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir, root, serve, real }));
             });
         };
         // Only servers that run can be kept warm.
@@ -7914,6 +7943,10 @@ impl Session {
                 for d in std::mem::take(&mut outcome.decorations) {
                     self.decode(d);
                 }
+                // Held back in this folder (not a previous one): the dialog asks once.
+                for (browse, runs) in self.state.semantics.take_trust_wanted() {
+                    if browse.as_deref() == self.state.project.as_ref().map(|p| p.root()) { self.want_trust(runs); }
+                }
                 let mut effect = Effect { repaint: outcome.repaint || !self.state.semantics.notices.is_empty(), copy: None, ..Effect::default() };
                 self.state.messages.append(&mut self.state.semantics.notices);
                 if outcome.ready {
@@ -7942,6 +7975,7 @@ impl Session {
                     // waiting forever.
                     if let Some(why) = self.state.provider().and_then(|v| match v.status {
                         semantics::Status::Missing(w) | semantics::Status::Failed(w) => Some(w),
+                        semantics::Status::Restricted(_) => Some(semantics::provider::RESTRICTED.to_owned()),
                         _ => None,
                     }) && self.state.asking.as_ref().is_some_and(|a| a.ask != Ask::Symbols)
                     {
@@ -9098,6 +9132,10 @@ impl Session {
         self.state.missing.clear();
         self.places_file = None;
         self.state.project = Some(Project::new(root.clone(), generation, self.state.settings.folders_first));
+        // Trust is decided on the folder with its links resolved (one lookup as it opens); a dialog about the folder
+        // before it does not apply.
+        self.project_real = Some(std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone()));
+        self.state.trust_prompt = None;
         self.project_generation.store(generation, Ordering::Relaxed);
         self.state.index = DeclIndex::new(index::INDEX_BYTES);
         self.index_batch = None;

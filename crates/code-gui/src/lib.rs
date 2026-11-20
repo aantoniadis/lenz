@@ -177,6 +177,8 @@ pub enum Details {
     Reconcile,
     Replace,
     Recovered,
+    /// The folder-trust dialog: Enter and Escape stay restricted; Alt+T trusts, Alt+P trusts the parent folder.
+    Trust,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -983,6 +985,8 @@ impl ReaderView {
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
             Some(Modal::StatusDetails { kind: Details::Checkout, .. }) => self.dispatch(Command::CheckoutChoice(code_core::branches::CheckoutChoice::Cancel), cx),
+            // Dismissed (Escape, Enter, a click outside): the folder stays restricted.
+            Some(Modal::StatusDetails { kind: Details::Trust, .. }) => self.dispatch(Command::TrustChoice(code_core::session::TrustChoice::StayRestricted), cx),
             _ => {}
         }
         self.sync_install_prompt();
@@ -1227,7 +1231,7 @@ impl ReaderView {
             _ => {}
         }
         // So do the checkout-problem dialog's.
-        for (kind, title, now) in [(Details::Workspace, "Edit Preview", self.session.workspace_preview().map(|p| p.text())), (Details::Change, "Marked change", self.session.inspected_change_text()), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
+        for (kind, title, now) in [(Details::Workspace, "Edit Preview", self.session.workspace_preview().map(|p| p.text())), (Details::Change, "Marked change", self.session.inspected_change_text()), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text()), (Details::Trust, code_core::session::TRUST_TITLE, self.session.trust_text())] {
             match (now, &mut self.modal) {
                 (Some(t), Some(Modal::StatusDetails { kind: k, text, .. })) if *k == kind => *text = t,
                 (None, Some(Modal::StatusDetails { kind: k, .. })) if *k == kind => {
@@ -2269,6 +2273,18 @@ impl ReaderView {
                 _ => {}
             }
             return cx.notify();
+        }
+        if let Some(Modal::StatusDetails { kind: Details::Trust, .. }) = &self.modal {
+            // It may open while the user types: Enter and Escape stay restricted (as any details dialog closes, below),
+            // and trusting takes Alt with a letter, never a plain key.
+            use code_core::session::TrustChoice as T;
+            let m = &ev.keystroke.modifiers;
+            let alt = m.alt && !(m.control || m.platform) && !ev.is_held;
+            let pick = match key { "t" if alt => Some(T::Trust), "p" if alt => Some(T::TrustParent), _ => None };
+            if let Some(c) = pick.filter(|c| self.session.trust_choices().iter().any(|(_, d)| d == c)) {
+                self.dispatch(Command::TrustChoice(c), cx);
+                return cx.notify();
+            }
         }
         if let Some(Modal::StatusDetails { kind: Details::Checkout, .. }) = &self.modal {
             // s Smart Checkout, f Force, y confirms the discard (another key than f, and never a held one); Escape
@@ -3480,6 +3496,11 @@ impl ReaderView {
             Details::Workspace => vec!["Previous (P)", "Next (N)", "Include/exclude", "Apply (A)", "Cancel"],
             Details::Install => self.session.server_install_actions().into_iter().map(CommandId::label).chain(std::iter::once("Close")).collect(),
             Details::Checkout => self.session.checkout_choices().into_iter().map(|c| c.0).collect(),
+            Details::Trust => self.session.trust_choices().into_iter().map(|(_, c)| match c {
+                code_core::session::TrustChoice::StayRestricted => "Stay Restricted (Enter)",
+                code_core::session::TrustChoice::Trust => "Trust (Alt+T)",
+                code_core::session::TrustChoice::TrustParent => "Trust Parent Folder (Alt+P)",
+            }).collect(),
             Details::Change => vec!["Show Diff (D)", "Revert This Change (R)", "Close"],
             Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
             Details::Text => vec!["Copy", "Close"],
@@ -3889,6 +3910,11 @@ impl ReaderView {
                                     self.dispatch(Command::CheckoutChoice(c), cx);
                                 }
                             }
+                            (Details::Trust, Some(i)) => {
+                                if let Some(&(_, c)) = self.session.trust_choices().get(i) {
+                                    self.dispatch(Command::TrustChoice(c), cx);
+                                }
+                            }
                             (Details::Workspace, Some(i)) => { if i < 2 { self.modal_scroll.set(0); } self.dispatch(match i { 0 => Command::MoveWorkspaceFile(-1), 1 => Command::MoveWorkspaceFile(1), 2 => Command::ToggleCurrentWorkspaceFile, 3 => Command::ApplyWorkspaceEdit, _ => Command::CancelWorkspaceEdit }, cx); },
                             (Details::Change, Some(0)) => self.run(CommandId::ShowChangeDiff,window,cx),
                             (Details::Change, Some(1)) => self.run(CommandId::RevertChange,window,cx),
@@ -3967,6 +3993,7 @@ impl ReaderView {
         }
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         if self.activity_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::ToggleActivityLog, window, cx); }
+        if self.restricted_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::FolderTrust, window, cx); }
         if self.results_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::ToggleResults, window, cx); }
         if let Some(l) = self.activity_layout() && l.bounds.contains(&ev.position) {
             self.log_focus = true;
@@ -4702,7 +4729,9 @@ impl ReaderView {
             let cols = (w.max(0.0) / self.char_w).floor() as usize;
             (Bounds { origin: gpui::point(px(x), px(self.height - self.status_h())), size: gpui::size(px(w.max(0.0)), px(self.status_h())) }, code_core::chrome::ellipsize(text, cols))
         };
-        let message_w = (room - server_w - sql_w - markers_w - position_w).max(0.0);
+        // The Restricted item takes the message's room.
+        let restricted_w = self.restricted_button().map_or(0.0, |(b, _)| f32::from(b.size.width) + STATUS_PAD);
+        let message_w = (room - server_w - sql_w - markers_w - position_w - restricted_w).max(0.0);
         (cell(left + position_w, server_w, &label), cell(left + position_w + server_w + sql_w + markers_w, message_w, &self.session.status_message()), cell(left, position_w, &position), cell(left + position_w + server_w, sql_w, &sql), cell(left + position_w + server_w + sql_w, markers_w, &markers), server_action)
     }
 
@@ -5915,7 +5944,7 @@ impl Render for ReaderView {
         let explorer_w = self.layout.explorer_width.map_or((self.width * 0.35).clamp(120.0, 280.0), |w| (w as f32).clamp(120.0, (self.width - 160.0).max(120.0)));
         self.sidebar_w = if self.session.state().has_tree() && self.tree_shown && (!narrow || self.tree_focus) { if narrow { self.width } else { explorer_w } } else { 0.0 };
         let (server_cell, message_cell, position_cell, sql_cell, markers_cell, server_action) = self.status_segments();
-        let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, code_core::semantics::Status::Missing(_) | code_core::semantics::Status::Failed(_) | code_core::semantics::Status::Disabled));
+        let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, code_core::semantics::Status::Missing(_) | code_core::semantics::Status::Failed(_) | code_core::semantics::Status::Disabled | code_core::semantics::Status::Restricted(_)));
         let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
         // pane's tabs.
@@ -6441,6 +6470,7 @@ impl Render for ReaderView {
         let commands_hover = self.commands_hover;
         let activity_button = self.activity_button();
         let results_button = self.results_button();
+        let restricted_button = self.restricted_button();
         let activity = self.activity_layout();
         let activity_height = self.activity_height();
         let terminal_height = self.terminal_height();
@@ -6604,6 +6634,9 @@ impl Render for ReaderView {
                         }
                         for (b, label) in activity_button.iter().chain(&results_button) {
                             lenz_gpui::text(window, cx, m, x0 + f32::from(b.left()), y0 + f32::from(b.top()) + 2.0, label, palette.accent);
+                        }
+                        if let Some((b, label)) = &restricted_button {
+                            lenz_gpui::text(window, cx, m, x0 + f32::from(b.left()), y0 + f32::from(b.top()) + 2.0, label, palette.error);
                         }
                         if let Some(log) = &activity {
                             let top = y0 + f32::from(log.bounds.top());

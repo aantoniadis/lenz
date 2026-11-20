@@ -35,6 +35,10 @@ impl App {
                 use code_core::branches::CheckoutChoice;
                 b(label, match c { CheckoutChoice::Smart => "s", CheckoutChoice::Force => "f", CheckoutChoice::ConfirmForce => "y", CheckoutChoice::Cancel => "Esc" }, false, matches!(c, CheckoutChoice::Force | CheckoutChoice::ConfirmForce))
             }).collect(),
+            Details::Trust => self.session.trust_choices().into_iter().map(|(label, c)| {
+                use code_core::session::TrustChoice;
+                b(label, match c { TrustChoice::StayRestricted => "Enter", TrustChoice::Trust => "Alt+T", TrustChoice::TrustParent => "Alt+P" }, false, false)
+            }).collect(),
             Details::Change => vec![b("Show Diff", "d", false, false), b("Revert Change", "r", false, true), close()],
             Details::Sql => vec![b("SQL menu", "m", false, false), b("Copy", "Ctrl+C", false, false), close()],
             Details::Commit => vec![b("Show Diff", "d", false, false), b("Copy Revision", "c", false, false), close()],
@@ -71,6 +75,6 @@ pub(super) fn paint_footer(frame: &mut ratatui::Frame, geometry: &mut Geometry, 
     match kind {
         Details::Text => { geometry.details_copy = rects.first().copied().unwrap_or_default(); geometry.details_close = rects.get(1).copied().unwrap_or_default(); }
         Details::Change | Details::Sql | Details::Commit => { geometry.details_diff = rects.first().copied().unwrap_or_default(); geometry.details_copy = rects.get(1).copied().unwrap_or_default(); geometry.details_close = rects.get(2).copied().unwrap_or_default(); }
-        Details::Workspace | Details::Terminal(_) | Details::Install | Details::External | Details::Reconcile | Details::Replace | Details::Recovered | Details::Close | Details::Checkout => geometry.details_choices = rects,
+        Details::Workspace | Details::Terminal(_) | Details::Install | Details::External | Details::Reconcile | Details::Replace | Details::Recovered | Details::Close | Details::Checkout | Details::Trust => geometry.details_choices = rects,
     }
 }

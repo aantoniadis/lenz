@@ -38,6 +38,8 @@ mod project_syntax;
 mod archive;
 #[path = "input_tests/branch_picker.rs"]
 mod branch_picker;
+#[path = "input_tests/trust.rs"]
+mod trust;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{
@@ -64,6 +66,13 @@ pub(crate) fn config(dir: &Path) -> Config {
     }
 }
 fn app(dir: &Path) -> App {
+    // The folder is trusted (an installed language server may start there, as before folder trust), so which servers
+    // a machine has installed never brings up the folder-trust dialog in these scenarios.
+    let providers = config(dir).providers;
+    if !providers.exists() && let Ok(real) = std::fs::canonicalize(dir) {
+        std::fs::create_dir_all(providers.parent().unwrap()).unwrap();
+        std::fs::write(&providers, serde_json::json!({ "trusted": [real] }).to_string()).unwrap();
+    }
     // Reader-shortcut scenarios explicitly model a backend without validated text input.
     App::with_text_input(config(dir), Some(dir.to_owned()), false)
 }
@@ -2147,7 +2156,7 @@ fn hover_is_debounced_cancelled_and_uses_real_core_documentation_request() {
     let mut cfg = config(dir.path());
     cfg.idle = code_core::semantics::IDLE;
     std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
-    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_LOG": log, "FAKE_LSP_NO_DECOR": "1" } } } }).to_string()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_LOG": log, "FAKE_LSP_NO_DECOR": "1" } } }, "trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()] }).to_string()).unwrap();
     let mut a = App::new(cfg, Some(root));
     a.dispatch(Command::Open(path.clone()));
     settle(&mut a, |a| {
@@ -2293,7 +2302,7 @@ fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
     let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
     let cfg = config(dir.path());
     std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
-    std::fs::write(&cfg.providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake,"env":{"FAKE_LSP_SLOW_DECOR":"1"}}}}).to_string()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake,"env":{"FAKE_LSP_SLOW_DECOR":"1"}}},"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string()).unwrap();
     let mut a = App::new(cfg, Some(root));
     a.dispatch(Command::Open(path.clone()));
     settle(&mut a, |a| a.session.state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready)
@@ -4175,7 +4184,7 @@ fn completion_popup_takes_only_its_keys_and_fits_a_tiny_terminal() {
     let mut cfg = config(dir.path());
     cfg.idle = code_core::semantics::IDLE;
     std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
-    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_NO_DECOR": "1" } } } }).to_string()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_NO_DECOR": "1" } } }, "trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()] }).to_string()).unwrap();
     let mut a = App::new(cfg, Some(root));
     a.enable_draft_input_for_test();
     a.dispatch(Command::Open(path.clone()));
@@ -4278,7 +4287,7 @@ fn snippet_placeholders_are_tabbed_through_and_escape_ends_them() {
     let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
     let cfg = config(dir.path());
     std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
-    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_NO_DECOR": "1" } } } }).to_string()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_NO_DECOR": "1" } } }, "trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()] }).to_string()).unwrap();
     let mut a = App::new(cfg, Some(root));
     a.enable_draft_input_for_test();
     a.dispatch(Command::Open(path.clone()));
@@ -4509,7 +4518,7 @@ fn completion_documentation_scroll_reaches_the_end_without_editing() {
     let mut build=std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     build.args(["build","-q","-p","code-core","--example","fake_lsp"]); if profile.ends_with("release") { build.arg("--release"); } assert!(build.status().unwrap().success());
     let mut cfg=config(dir.path()); cfg.idle=code_core::semantics::IDLE;
-    std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap(); std::fs::write(&cfg.providers,serde_json::json!({"providers":{"rust-analyzer":{"executable":profile.join("examples/fake_lsp"),"env":{"FAKE_LSP_COMPLETION_DOC":"1","FAKE_LSP_NO_DECOR":"1"}}}}).to_string()).unwrap();
+    std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap(); std::fs::write(&cfg.providers,serde_json::json!({"providers":{"rust-analyzer":{"executable":profile.join("examples/fake_lsp"),"env":{"FAKE_LSP_COMPLETION_DOC":"1","FAKE_LSP_NO_DECOR":"1"}}},"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string()).unwrap();
     let mut a=App::new(cfg,Some(root)); a.enable_draft_input_for_test(); a.dispatch(Command::Open(path.clone())); settle(&mut a,|a|a.session.state().provider().is_some_and(|p|p.status==code_core::semantics::Status::Ready));
     let at=text.find("hel }").unwrap()+3; a.dispatch(Command::Select(Selection{anchor:at,head:at})); a.dispatch(Command::Complete);
     settle(&mut a,|a|a.session.state().completion().is_some_and(|c|c.documentation_preview().is_some())); draw(&mut a,100,30);
@@ -4579,7 +4588,7 @@ fn java_member_semantic_colour_stays_painted_during_typing_and_lexical_arrival()
         providers.insert(p.id.into(), serde_json::json!({"executable":format!("/nonexistent/{}", p.id)}));
     }
     providers.insert("jdtls".into(), serde_json::json!({"executable":profile.join("examples/fake_lsp"),"env":{"FAKE_LSP_TOKEN_GATE":gate}}));
-    std::fs::write(&cfg.providers, serde_json::json!({"providers":providers}).to_string()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({"providers":providers,"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string()).unwrap();
     let mut a = App::new(cfg, Some(path.clone()));
     a.enable_draft_input_for_test();
     settle(&mut a, |a| a.session.state().active().and_then(|tab| a.session.state().view(tab.id())).is_some_and(|view| view.tokens().is_some() && view.highlights().is_some()));

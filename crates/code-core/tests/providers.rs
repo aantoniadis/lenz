@@ -88,7 +88,8 @@ fn real_entries(entries: impl FnOnce(&Path) -> Vec<(String, Value)>, files: &[(&
     let mut all: serde_json::Map<String, Value> = PROVIDERS.iter().map(|p| (p.id.to_string(), json!({ "executable": format!("/nonexistent/{}", p.id) }))).collect();
     all.extend(entries(&root));
     let providers = dir.path().join("config/providers.json");
-    write(dir.path(), "config/providers.json", &json!({ "providers": all }).to_string());
+    // The real servers run the fixture's code: its folder is trusted.
+    write(dir.path(), "config/providers.json", &json!({ "providers": all, "trusted": [std::fs::canonicalize(dir.path()).unwrap()] }).to_string());
     // Draft input as on a validated backend: completion edits the draft (never the fixture on disk).
     let s = Session::with_text_input(Config {
         themes: ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-code"),

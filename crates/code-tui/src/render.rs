@@ -839,6 +839,7 @@ impl App {
                 code_core::semantics::Status::Missing(_)
                     | code_core::semantics::Status::Failed(_)
                     | code_core::semantics::Status::Disabled
+                    | code_core::semantics::Status::Restricted(_)
             )
         });
         line(
@@ -876,10 +877,19 @@ impl App {
             );
             geometry.controls.push((CommandId::StatusDetails, baseline_rect));
         }
+        // "Restricted" while the open folder is not trusted (Lenz runs no code from it), in the message's room: a click
+        // opens the folder-trust dialog.
+        let restricted = self.session.restricted_label().map(|label| format!(" {label} ")).unwrap_or_default();
+        let restricted_width = (restricted.width() as u16).min(results_rect.x.saturating_sub(baseline_rect.right()) / 2);
+        let restricted_rect = Rect::new(results_rect.x.saturating_sub(restricted_width), area.y, restricted_width, 1);
+        if restricted_width > 0 {
+            line(frame.buffer_mut(), restricted_rect, &code_core::chrome::ellipsize(&restricted, restricted_width as usize), style(p.error, p.status_bg).add_modifier(Modifier::BOLD));
+            geometry.controls.push((CommandId::FolderTrust, restricted_rect));
+        }
         let message_rect = Rect::new(
             baseline_rect.right(),
             area.y,
-            results_rect.x.saturating_sub(baseline_rect.right()),
+            restricted_rect.x.saturating_sub(baseline_rect.right()),
             1,
         );
         let message = self.session.status_message();

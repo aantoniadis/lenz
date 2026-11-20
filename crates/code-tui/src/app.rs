@@ -118,6 +118,8 @@ pub(crate) enum Details {
     Reconcile,
     Replace,
     Recovered,
+    /// The folder-trust dialog: Enter and Escape stay restricted; Alt+T trusts, Alt+P trusts the parent folder.
+    Trust,
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -647,7 +649,7 @@ impl App {
     }
     pub(crate) fn show_documentation(&mut self) {
         // The core's commit popup opens, follows and closes its dialog.
-        for (kind, title, now) in [(Details::Workspace, "Edit Preview · A applies · Esc cancels · 1–9 toggle files", self.session.workspace_preview().map(|p|p.text())), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
+        for (kind, title, now) in [(Details::Workspace, "Edit Preview · A applies · Esc cancels · 1–9 toggle files", self.session.workspace_preview().map(|p|p.text())), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text()), (Details::Trust, code_core::session::TRUST_TITLE, self.session.trust_text())] {
             match (now, self.modal.as_mut()) {
                 (Some(text), Some(Modal { kind: Prompt::Details { kind: k, body, .. }, .. })) if *k == kind => *body = text,
                 (None, Some(Modal { kind: Prompt::Details { kind: k, .. }, .. })) if *k == kind => {
@@ -1181,6 +1183,8 @@ impl App {
                 Prompt::Details { kind: Details::Change, .. } => self.dispatch(Command::CloseChange),
                 Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(code_core::branches::CheckoutChoice::Cancel)),
+                // Dismissed: the folder stays restricted, as Escape chooses.
+                Prompt::Details { kind: Details::Trust, .. } => self.dispatch(Command::TrustChoice(code_core::session::TrustChoice::StayRestricted)),
                 Prompt::Branches | Prompt::BranchMenu { .. } => self.dispatch(Command::CloseBranches),
                 Prompt::Details { .. } if self.session.state().documentation().is_some() => {
                     self.dispatch(Command::CloseDocumentation)
@@ -1679,6 +1683,23 @@ impl App {
                 m.secondary_focus = !(matches!(key.code, KeyCode::BackTab) || key.modifiers.contains(KeyModifiers::SHIFT));
             }
             return;
+        }
+        // The folder-trust dialog may open while the user types: Enter and Escape stay restricted, trusting takes Alt
+        // with a letter (never a plain key), and only its scrolling keys go on; nothing reaches behind it.
+        if matches!(kind, Prompt::Details { kind: Details::Trust, .. }) {
+            use code_core::session::TrustChoice;
+            let choice = match key.code {
+                KeyCode::Enter | KeyCode::Esc => Some(TrustChoice::StayRestricted),
+                KeyCode::Char('t' | 'T') if alt && !control => Some(TrustChoice::Trust),
+                KeyCode::Char('p' | 'P') if alt && !control => Some(TrustChoice::TrustParent),
+                _ => None,
+            };
+            if let Some(choice) = choice.filter(|c| self.session.trust_choices().iter().any(|(_, d)| d == c)) {
+                // Answered: the core closes its dialog.
+                self.modal = None;
+                return self.dispatch(Command::TrustChoice(choice));
+            }
+            if !matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End) || control || alt { return; }
         }
         // A delete confirmation takes Enter and Escape only: nothing types into it or reaches behind it.
         if matches!(kind, Prompt::ConfirmDelete { .. }) && !matches!(key.code, KeyCode::Enter | KeyCode::Esc) { return; }
@@ -3286,6 +3307,17 @@ impl App {
             }
             if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Recovered,..})) {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=code_core::recovery::Choice::ALL.get(i) { self.choose_recovery(*choice); }
+                return;
+            }
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(Modal { kind: Prompt::Details { kind: Details::Trust, .. }, .. }) = &self.modal
+            {
+                if let Some(i) = self.layout.details_choices.iter().position(|b| b.contains(point))
+                    && let Some(&(_, c)) = self.session.trust_choices().get(i)
+                {
+                    self.modal = None;
+                    self.dispatch(Command::TrustChoice(c));
+                }
                 return;
             }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))

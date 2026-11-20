@@ -55,6 +55,14 @@ fn fixture_providers(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, serve
     fixture_setup(cx,file,servers,false)
 }
 fn fixture_setup(cx: &mut TestAppContext,file:Option<(&str,&[u8])>,servers:&[(&str,&Path,Option<&str>,Option<&str>)],production:bool)->Fixture {
+    fixture_trusting(cx, file, servers, production, true)
+}
+/// As [`fixture_providers`], in a folder the user has never been asked to trust (Restricted).
+fn untrusted_fixture(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, servers: &[(&str, &Path, Option<&str>, Option<&str>)]) -> Fixture {
+    fixture_trusting(cx, file, servers, false, false)
+}
+/// `trusted`: the fixture's folder is trusted (servers that run a project's code start there).
+fn fixture_trusting(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, servers: &[(&str, &Path, Option<&str>, Option<&str>)], production: bool, trusted: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let path = file.map(|(name, bytes)| {
         let p = dir.path().join(name);
@@ -80,7 +88,8 @@ fn fixture_setup(cx: &mut TestAppContext,file:Option<(&str,&[u8])>,servers:&[(&s
         }
         all.insert(p.id.into(), entry);
     }
-    std::fs::write(&providers, serde_json::json!({ "providers": all }).to_string()).unwrap();
+    let trusted: Vec<std::path::PathBuf> = if trusted { vec![std::fs::canonicalize(dir.path()).unwrap()] } else { Vec::new() };
+    std::fs::write(&providers, serde_json::json!({ "providers": all, "trusted": trusted }).to_string()).unwrap();
     let config = Config {
         themes: lenz_content::theme::ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-code"),
         recent: dir.path().join("state/lenz-code/recent-roots.json"),
@@ -985,19 +994,20 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     activate(&mut v, CommandId::EnableServer);
     drop(v);
     settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_)))
-        && r.session().disabled(CommandId::RestartServer).is_none() && r.session().disabled(CommandId::TrustProjectTools).is_none());
-    // The folder's project tools are trusted, then no longer, from the same menu: the row follows the state.
-    let mut v = visual(cx, &f);
-    v.simulate_keystrokes("f2");
-    activate(&mut v, CommandId::TrustProjectTools);
-    drop(v);
-    settle(cx, &f, |r| r.session().disabled(CommandId::UntrustProjectTools).is_none());
-    assert!(f.view.read_with(cx, |r, _| r.server_rows().iter().any(|(_, id)| *id == Some(CommandId::UntrustProjectTools))));
+        && r.session().disabled(CommandId::RestartServer).is_none() && r.session().disabled(CommandId::UntrustProjectTools).is_none());
+    // The folder's project tools are no longer trusted, then trusted again, from the same menu: the row follows the
+    // state.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::UntrustProjectTools);
     drop(v);
-    settle(cx, &f, |r| r.session().disabled(CommandId::TrustProjectTools).is_none()
+    settle(cx, &f, |r| r.session().disabled(CommandId::TrustProjectTools).is_none());
+    assert!(f.view.read_with(cx, |r, _| r.server_rows().iter().any(|(_, id)| *id == Some(CommandId::TrustProjectTools))));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("f2");
+    activate(&mut v, CommandId::TrustProjectTools);
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::UntrustProjectTools).is_none()
         && r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_)))
         && r.session().disabled(CommandId::RestartServer).is_none());
     let mut v = visual(cx, &f);
@@ -8338,4 +8348,89 @@ fn results_heading_stop_rerun_hide_and_back_buttons_run(cx: &mut TestAppContext)
     assert_eq!(f.view.read_with(cx, |v, _| v.session().state().results().unwrap().query().to_owned()), "needle");
     press(cx, "Hide");
     assert!(f.view.read_with(cx, |v, _| v.session().state().results().is_none() && v.results_button().is_some()));
+}
+
+/// The folder-trust dialog through the GUI's real input: the held-back server opens it; keys and typed text go to it
+/// first (the draft and the file stay as they were, and a plain t does not trust); Enter and Escape stay restricted;
+/// the Restricted status item and the command menu open it again; a click on Trust starts the held-back server.
+#[gpui::test]
+fn gui_the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restricted(cx: &mut TestAppContext) {
+    use code_core::semantics::provider::Trust;
+    let scripts = tempfile::tempdir().unwrap();
+    let marker = scripts.path().join("server-ran");
+    let server = scripts.path().join("server");
+    std::fs::write(&server, format!("#!/bin/sh\ntouch '{}'\nexec '{}' \"$@\"\n", marker.display(), fake_lsp().display())).unwrap();
+    std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let f = untrusted_fixture(cx, None, &[("rust-analyzer", &server, None, None)]);
+    let root = f.dir.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    let file = root.join("src/main.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, |r| r.session().state().project().is_some());
+    assert!(f.view.read_with(cx, |r, _| r.modal.is_none()), "opening a folder runs nothing, so asks nothing");
+    let trust_open = |r: &ReaderView| matches!(r.modal, Some(Modal::StatusDetails { kind: Details::Trust, .. }));
+    // The real trigger: the held-back server.
+    f.view.update(cx, |v, cx| v.dispatch_for_test(Command::Open(file.clone()), cx));
+    settle(cx, &f, |r| trust_open(r) && r.session().state().current_source().is_some());
+    let text = |r: &ReaderView| r.session().state().current_source().map(|s| s.copy_range(0..s.len_bytes()).unwrap()).unwrap_or_default();
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { title, .. }) if title == code_core::session::TRUST_TITLE)));
+    type_text(&mut v, "xtTp");
+    v.simulate_keystrokes("backspace ctrl-t shift-t");
+    assert!(f.view.read_with(&v, |r, _| trust_open(r) && text(r) == "fn main() {}\n" && r.session().folder_trust() == Some(Trust::Unasked)));
+    // The buttons, Stay Restricted first (the default).
+    let labels = f.view.read_with(&v, |r, _| r.details_labels(Details::Trust));
+    assert_eq!(labels, ["Stay Restricted (Enter)", "Trust (Alt+T)", "Trust Parent Folder (Alt+P)"]);
+    // Enter stays restricted, remembered as declined; nothing ran.
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| !trust_open(r) && r.session().folder_trust() == Some(Trust::Declined)));
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::FolderTrust).is_none() && matches!(r.session().state().provider().map(|p| p.status), Some(code_core::semantics::Status::Restricted(_))));
+    // The Restricted status item opens it again; Escape stays restricted.
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let (button, label) = f.view.read_with(&v, |r, _| r.restricted_button()).expect("the Restricted status item");
+    assert_eq!(label, "Restricted");
+    v.simulate_click(button.center(), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| trust_open(r)), "the status item opens the dialog");
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| !trust_open(r) && r.session().folder_trust() == Some(Trust::Declined)));
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::FolderTrust).is_none());
+    // The command menu opens it; a click on Trust starts the held-back server, nothing reopened.
+    let mut v = visual(cx, &f);
+    choose_menu_command(&mut v, &f, CommandId::FolderTrust);
+    assert!(f.view.read_with(&v, |r, _| trust_open(r)), "the command menu opens the dialog");
+    draw(&mut v);
+    let buttons = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w, &r.details_labels(Details::Trust)));
+    v.simulate_click(buttons[1].center(), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| !trust_open(r) && r.session().folder_trust() == Some(Trust::Trusted)));
+    drop(v);
+    settle(cx, &f, |r| marker.exists() && r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Ready | code_core::semantics::Status::Indexing(_))));
+    assert!(f.view.read_with(cx, |r, _| r.restricted_button().is_none()), "no Restricted item in a trusted folder");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {}\n");
+}
+
+/// Alt+T in the GUI dialog trusts; Alt+P trusts the folder holding the open one.
+#[gpui::test]
+fn gui_alt_t_and_alt_p_answer_the_folder_trust_dialog(cx: &mut TestAppContext) {
+    use code_core::semantics::provider::Trust;
+    for (keys, trusted) in [("alt-t", "project"), ("alt-p", "")] {
+        let f = untrusted_fixture(cx, None, &[]);
+        let root = f.dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+        settle(cx, &f, |r| r.session().state().project().is_some());
+        f.view.update(cx, |v, cx| v.dispatch_for_test(Command::OpenFolderTrust, cx));
+        let mut v = visual(cx, &f);
+        assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { kind: Details::Trust, .. }))));
+        v.simulate_keystrokes(keys);
+        assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().folder_trust() == Some(Trust::Trusted)), "{keys}");
+        let folder = if trusted.is_empty() { std::fs::canonicalize(f.dir.path()).unwrap() } else { std::fs::canonicalize(&root).unwrap() };
+        assert!(f.view.read_with(&v, |r, _| r.session().state().notices().iter().any(|n| n.contains(&format!("Trusted {}", folder.display())))), "{keys}");
+    }
 }

@@ -48,7 +48,7 @@ fn config(base: &Path) -> Config {
         .collect();
     std::fs::write(
         &providers,
-        serde_json::json!({"providers": providers_json}).to_string(),
+        serde_json::json!({"providers": providers_json, "trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string(),
     )
     .unwrap();
     Config {

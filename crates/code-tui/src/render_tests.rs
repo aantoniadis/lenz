@@ -79,7 +79,7 @@ fn app(dir: &std::path::Path, dark: bool) -> App {
             .collect();
     std::fs::write(
         &providers,
-        serde_json::json!({"providers":settings}).to_string(),
+        serde_json::json!({"providers":settings,"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string(),
     )
     .unwrap();
     App::new(
@@ -153,7 +153,7 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
         let base = dir.path();
         std::fs::write(
             base.join("providers.json"),
-            serde_json::json!({"providers":{"rust-analyzer":{"executable":fake}}}).to_string(),
+            serde_json::json!({"providers":{"rust-analyzer":{"executable":fake}},"trusted":[std::fs::canonicalize(std::env::temp_dir()).unwrap()]}).to_string(),
         )
         .unwrap();
         let mut app = App::new(

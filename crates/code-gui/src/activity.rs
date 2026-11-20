@@ -28,6 +28,15 @@ impl ReaderView {
         let width = ((lenz_content::wrap::width(&label) + 1) as f32 * self.char_w).min(right.max(0.0));
         Some((Bounds { origin: point(px(right - width), px(self.height - self.status_h())), size: size(px(width), px(self.status_h())) }, label))
     }
+    /// "Restricted" left of the results and log buttons while the open folder is not trusted (Lenz runs no code from
+    /// it); a click opens the folder-trust dialog.
+    pub(super) fn restricted_button(&self) -> Option<(Bounds<Pixels>, String)> {
+        let label = self.session.restricted_label()?;
+        let right = self.results_button().or_else(|| self.activity_button()).map(|(b, _)| f32::from(b.left()) - STATUS_PAD)?;
+        // At most a quarter of the room left of it: it gives way before the footer's other cells.
+        let width = ((lenz_content::wrap::width(label) + 1) as f32 * self.char_w).min((right / 4.0).max(0.0));
+        Some((Bounds { origin: point(px(right - width), px(self.height - self.status_h())), size: size(px(width), px(self.status_h())) }, label.to_owned()))
+    }
     pub(super) fn activity_layout(&mut self) -> Option<ActivityLayout> {
         let height = self.activity_height();
         if height == 0.0 { return None; }

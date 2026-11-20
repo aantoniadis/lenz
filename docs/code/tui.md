@@ -646,7 +646,7 @@ F2 shows the detected/tested server version, bounded launch log and selected run
 
 Haml templates (`.haml`, including `.html.haml`) suggest tag names after `%` and attributes inside `(…)`
 with Ctrl+Space. Enter follows Haml indentation. Format Document uses installed haml-lint when the project
-has `.haml-lint.yml`; each result is one Undo step, and only Save writes it. Ruby completion, Parameter Info
+has `.haml-lint.yml` and you trust its folder; each result is one Undo step, and only Save writes it. Ruby completion, Parameter Info
 and problems use exact template locations. See [Haml capabilities and limits](providers.md#haml-editing).
 
 For PostgreSQL SQL drafts, choose the dialect in the command menu. Ctrl+Space completes query-local

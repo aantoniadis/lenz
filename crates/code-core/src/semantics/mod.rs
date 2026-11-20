@@ -297,6 +297,9 @@ pub enum Status {
     Failed(String),
     /// Turned off for this folder by the user.
     Disabled,
+    /// Not started: it runs the project's code (what it would run, as [`provider::Provider::runs`] says it), and the
+    /// folder is not trusted (Restricted mode).
+    Restricted(&'static str),
 }
 
 /// A provider's state for one workspace, for presentation.
@@ -332,6 +335,7 @@ impl ProviderView {
             Status::Missing(_) => "LSP unavailable",
             Status::Failed(_) => "LSP stopped",
             Status::Disabled => "LSP off",
+            Status::Restricted(_) => "LSP off until trusted",
         }.to_owned()
     }
 
@@ -355,6 +359,7 @@ impl ProviderView {
             Status::Missing(why) => format!("unavailable: {why}"),
             Status::Failed(why) => format!("stopped: {why}"),
             Status::Disabled => "disabled for this folder".to_string(),
+            Status::Restricted(_) => provider::RESTRICTED.to_lowercase(),
         };
         let untested = match (&self.version, self.untested) {
             (Some(v), true) => format!(" (untested version {v})"),
@@ -414,7 +419,11 @@ type Served = (usize, PathBuf);
 pub enum Event {
     /// The workspace root for sources in `dir` by provider `provider`'s rules (or the override), or none.
     /// `provider` is the language's; `serve` the provider serving `root` ([`provider::serving`]).
-    Resolved { root_epoch: u64, provider: usize, dir: PathBuf, root: Option<PathBuf>, serve: usize },
+    /// `real`: the root with its links resolved, which folder trust is decided on.
+    Resolved { root_epoch: u64, provider: usize, dir: PathBuf, root: Option<PathBuf>, serve: usize, real: Option<PathBuf> },
+    /// The server would run the project's own code (`runs` says what) in a folder that is not trusted: `held`, it was
+    /// not started (its executable was found); else it runs without that program.
+    Restricted { session: u64, runs: &'static str, held: bool },
     /// The executable answered `--version` (or could not be run).
     Detected { session: u64, version: Result<String, String> },
     /// The project environment it analyses with, as Server Details says it, or why it must not start with it
@@ -709,6 +718,11 @@ pub struct Semantics {
     waiting: Option<Waiting>,
     /// The browsing root, as of the last sync.
     browse: Option<PathBuf>,
+    /// Workspace roots with their links resolved (as resolved), which trust is decided on.
+    real: HashMap<PathBuf, PathBuf>,
+    /// What servers held back in a folder that is not trusted would run, with the browsing root they were held in:
+    /// for the session to ask about once.
+    trust_wanted: Vec<(Option<PathBuf>, &'static str)>,
     /// The server session last sent a question of the user's: the one whose answer opened a dependency.
     last_asked: Option<u64>,
     /// Server-originated notices for the session to show (declined edits, server errors).
@@ -744,6 +758,8 @@ impl Semantics {
             next_session: 0,
             waiting: None,
             browse: None,
+            real: HashMap::new(),
+            trust_wanted: Vec::new(),
             last_asked: None,
             notices: Vec::new(),
             shell: shell::Linter::default(),
@@ -905,7 +921,7 @@ impl Semantics {
             let session = match self.server(q, &root) {
                 Some(s) => s.session,
                 None => {
-                    let launch = self.settings.launch_in(&PROVIDERS[q], browse, &root);
+                    let launch = self.settings.launch_in(&PROVIDERS[q], browse, &root, self.trusted(&root));
                     self.queue(Key { provider: q, root, launch }, doc.source().to_owned())
                 }
             };
@@ -1035,7 +1051,7 @@ impl Semantics {
                     "clientInfo": { "name": crate::chrome::APP_NAME },
                     "rootUri": lsp::file_uri(&s.key.root),
                     "workspaceFolders": [{ "uri": lsp::file_uri(&s.key.root), "name": name }],
-                    "initializationOptions": (provider.withheld)(self.settings.initialization(provider, Some(&s.key.root))),
+                    "initializationOptions": sent(&s.key, (provider.withheld)(self.settings.initialization(provider, Some(&s.key.root)))),
                     "capabilities": {
                         "general": { "positionEncodings": if provider.utf8 { json!(["utf-8", "utf-16"]) } else { json!(["utf-16"]) } },
                         "textDocument": {
@@ -1145,6 +1161,7 @@ impl Semantics {
         };
         match &s.status {
             Status::Missing(why) => return Err(format!("{name} is unavailable: {why}")),
+            Status::Restricted(_) => return Err(format!("{name}: {}", provider::RESTRICTED)),
             Status::Failed(why) => return Err(format!("{name} stopped: {why}")),
             _ if !s.initialized() && background => return Err(not_ready()),
             _ if !s.initialized() => {
@@ -1459,12 +1476,17 @@ impl Semantics {
         true
     }
 
-    /// Trust (or stop trusting) the project tools of browsing root `browse`, remembered across restarts: its servers
-    /// stop, and every workspace's server is chosen again (typescript-go depends on it). Returns the settings to save.
-    pub fn set_trusted(&mut self, browse: PathBuf, trusted: bool) -> Settings {
+    /// Trust `folder` (a canonical path: the browsing root, or the folder holding it), or keep it restricted,
+    /// remembered across restarts: the servers of browsing root `browse`, those held back and those of workspaces in
+    /// `folder` stop, and every workspace's server is chosen again (typescript-go depends on it), so held-back servers
+    /// start (or trusted ones stay stopped) without reopening anything. Returns the settings to save.
+    pub fn set_trust(&mut self, folder: PathBuf, trusted: bool, browse: Option<&Path>) -> Settings {
         self.reload();
-        if trusted { self.settings.trusted.insert(browse.clone()); } else { self.settings.trusted.remove(&browse); }
-        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(|s| s.key.root.starts_with(&browse));
+        self.settings.set_trust(folder.clone(), trusted);
+        let real = &self.real;
+        let affected = |s: &Server| browse.is_some_and(|b| s.key.root.starts_with(b)) || matches!(s.status, Status::Restricted(_))
+            || real.get(&s.key.root).is_some_and(|r| r.starts_with(&folder));
+        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(affected);
         self.servers = keep;
         let servers = &self.servers;
         self.queued.retain(|q| servers.iter().any(|s| s.session == *q));
@@ -1473,6 +1495,17 @@ impl Semantics {
         self.invalidate_root_lookups();
         stop.into_iter().for_each(Server::stop);
         self.settings.clone()
+    }
+
+    /// Whether the user trusts the folder holding workspace `root` (decided on its links resolved, once known).
+    fn trusted(&self, root: &Path) -> bool {
+        self.settings.trust(self.real.get(root).map_or(root, PathBuf::as_path)) == provider::Trust::Trusted
+    }
+
+    /// What servers held back in a folder that is not trusted would run, since last asked, with the browsing root
+    /// they were held in.
+    pub fn take_trust_wanted(&mut self) -> Vec<(Option<PathBuf>, &'static str)> {
+        std::mem::take(&mut self.trust_wanted)
     }
 
     /// Turn `provider` off (or on again) for browsing root `browse`, remembered across restarts. Turning it off
@@ -1598,10 +1631,11 @@ impl Semantics {
 
     pub fn event(&mut self, event: Event, events: &async_channel::Sender<Completion>) -> Outcome {
         let mut outcome = match event {
-            Event::Resolved { root_epoch, provider, dir, root, serve } => {
+            Event::Resolved { root_epoch, provider, dir, root, serve, real } => {
                 if root_epoch != self.root_epoch {
                     Outcome::default()
                 } else {
+                    if let (Some(root), Some(real)) = (&root, real) { self.real.insert(root.clone(), real); }
                     // One choice per root: a server of the language already there keeps serving it.
                     let serve = root.as_ref().and_then(|r| self.servers.iter().find(|s| provider::primary(s.key.provider) == provider && s.key.root == *r)).map_or(serve, |s| s.key.provider);
                     self.roots.insert((provider, dir), Some(root.map(|r| (serve, r))));
@@ -1617,6 +1651,15 @@ impl Semantics {
                         s.initializing = None;
                     }
                 }
+                Outcome { repaint: true, ..Outcome::default() }
+            }
+            Event::Restricted { session, runs, held } => {
+                let Some(s) = self.servers.iter_mut().find(|s| s.session == session) else { return Outcome::default() };
+                if held {
+                    s.status = Status::Restricted(runs);
+                    s.initializing = None;
+                }
+                self.trust_wanted.push((self.browse.clone(), runs));
                 Outcome { repaint: true, ..Outcome::default() }
             }
             Event::Environment { session, line } => {
@@ -2124,7 +2167,11 @@ impl Server {
                     "workspace/configuration" => {
                         let provider = &PROVIDERS[self.key.provider];
                         let items = m["params"]["items"].as_array().map_or(&[][..], Vec::as_slice);
-                        Ok(Value::Array(items.iter().map(|i| settings.configuration(provider, Some(&self.key.root), i["section"].as_str())).collect()))
+                        Ok(Value::Array(items.iter().map(|i| match i["section"].as_str() {
+                            // A relative interpreter is withheld whichever way it is asked.
+                            Some("python.pythonPath") => sent(&self.key, json!({ "pythonPath": settings.configuration(provider, Some(&self.key.root), Some("python.pythonPath")) }))["pythonPath"].clone(),
+                            section => sent(&self.key, settings.configuration(provider, Some(&self.key.root), section)),
+                        }).collect()))
                     }
                     "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" | "window/showMessageRequest" => Ok(Value::Null),
                     // Its results changed: forget what was asked; the next sync asks again.
@@ -2431,7 +2478,7 @@ fn runtime_failure(key: &Key, provider: &Provider, exe: &Path) -> String {
     };
     let details = match runtime {
         Some(path) => {
-            let version = runtime::version_in(&path, flag, &key.launch.env, Some(&key.root)).unwrap_or_else(|e| format!("version unavailable: {e}"));
+            let version = runtime::version_in(&path, flag, &key.launch.env, Some(probe_dir(key))).unwrap_or_else(|e| format!("version unavailable: {e}"));
             let version = version.lines().collect::<Vec<_>>().join(" | ");
             format!("; {label}: {} ({version})", path.display())
         }
@@ -2447,12 +2494,28 @@ fn runtime_failure(key: &Key, provider: &Provider, exe: &Path) -> String {
     lenz_content::display::expand_tabs(&format!("{details}{}", requirement.map(|r| format!("; Pyright package engines.node: {r}")).unwrap_or_default())).0
 }
 
+/// A provider's settings as server `key` receives them: Pyright's leave out a project's interpreter in a folder the user
+/// does not trust ([`python::untrusted`]).
+fn sent(key: &Key, settings: Value) -> Value {
+    if PROVIDERS[key.provider].id == "pyright" && key.launch.trusted.is_none() { python::untrusted(settings) } else { settings }
+}
+
+/// Where a server's version (and its runtime's) is asked: its workspace in a folder the user trusts, else outside any
+/// project, so that a version manager's shim does not read the project's toolchain files.
+fn probe_dir(key: &Key) -> &Path {
+    if key.launch.trusted.is_some() { &key.root } else { Path::new(runtime::NEUTRAL) }
+}
+
 /// Launch a server off the UI thread: check `--version`, start the process in its own process group, then pump
 /// its input from `inbox` and its output into `events` until it exits.
 #[allow(clippy::too_many_arguments)]
 fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static str, PathBuf)>, cache: PathBuf, options: Value, session: u64, inbox: async_channel::Receiver<Outgoing>, process: Arc<Mutex<Process>>, events: async_channel::Sender<Completion>) {
     let send = move |e: Event| events.send_blocking(Completion::Semantic(e)).is_ok();
     let _ = std::thread::Builder::new().name(format!("reader-{}", provider.id)).spawn(move || {
+        // A project program it would run in a folder the user trusts (typescript-go's own `tsc`): the session asks.
+        if key.launch.trusted.is_none() && let Some(runs) = provider::untrusted_program(provider, &key.root) {
+            send(Event::Restricted { session, runs, held: false });
+        }
         // Not on PATH and not named in the settings: the server an installed VS Code ships, run with `node`.
         let mut args: Vec<String> = provider.fixed_args.iter().map(|a| a.to_string()).chain(key.launch.args.iter().cloned()).collect();
         let mut bundled_version = None;
@@ -2496,11 +2559,17 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
             });
             return;
         };
+        // A server that runs the project's code starts only in a folder the user trusts: nothing of it runs, not even
+        // its version. (Not installed, it says so above, as anywhere.)
+        if !provider.runs.is_empty() && key.launch.trusted.is_none() {
+            send(Event::Restricted { session, runs: provider.runs, held: true });
+            return;
+        }
         // The version, as the provider says it can be found (else its `initialize` answer names it).
         // A version flag that fails means it cannot run; a version that cannot be read is only unknown.
         let version = match provider.version {
             _ if let Some(v) = &bundled_version => Ok(if v.is_empty() { String::new() } else { format!("{v} (its built-in server)") }),
-            provider::Version::Flag(args) => runtime::version_args_in(&exe, args, &key.launch.env, Some(&key.root))
+            provider::Version::Flag(args) => runtime::version_args_in(&exe, args, &key.launch.env, Some(probe_dir(&key)))
                 .map(|v| v.lines().next().unwrap_or_default().trim().to_owned())
                 .map_err(|e| lenz_content::display::expand_tabs(&format!("`{} {}` failed: {}", exe.display(), args.join(" "), e.lines().collect::<Vec<_>>().join(" | "))).0),
             provider::Version::Package(name) => Ok(provider::package_version(&exe, name).map(|v| format!("{name} {v}")).unwrap_or_default()),
@@ -2530,7 +2599,8 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
             command.arg(flag).arg(folder);
         }
         // The provider's own variables for this root first; the user's `env` wins.
-        let root_env = match (provider.root_env)(&key.root, &cache, &exe, &key.launch.env) {
+        let within = key.launch.trusted.as_deref().unwrap_or(&key.root);
+        let root_env = match (provider.root_env)(&key.root, &cache, &exe, &key.launch.env, within) {
             Ok(env) => env,
             Err(reason) => {
                 send(Event::Exited { session, reason: lenz_content::display::expand_tabs(&reason).0 });
@@ -2876,9 +2946,9 @@ mod tests {
         assert!(!semantics.roots.contains_key(&key),"the obsolete choice cannot start a server");
         semantics.roots.insert(key.clone(),None);
         let root_epoch=semantics.root_epoch();
-        semantics.event(Event::Resolved{root_epoch,provider,dir:dir.path().to_owned(),root:None,serve:provider},&tx);
+        semantics.event(Event::Resolved{root_epoch,provider,dir:dir.path().to_owned(),root:None,serve:provider,real:None},&tx);
         assert!(matches!(semantics.roots.get(&key),Some(Some(None))),"the next lookup is accepted");
-        let outcome=semantics.event(Event::Resolved{root_epoch:old_epoch,provider,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:provider},&tx);
+        let outcome=semantics.event(Event::Resolved{root_epoch:old_epoch,provider,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:provider,real:None},&tx);
         assert!(!outcome.ready);
         assert!(matches!(semantics.roots.get(&key),Some(Some(None))),"an old answer arriving last cannot replace the new result");
     }
@@ -2891,7 +2961,7 @@ mod tests {
         let root_epoch=semantics.root_epoch();
         semantics.manifests_changed();
         let (tx,_rx)=async_channel::bounded(32);
-        semantics.event(Event::Resolved{root_epoch,provider:0,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:0},&tx);
+        semantics.event(Event::Resolved{root_epoch,provider:0,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:0,real:None},&tx);
         assert!(!semantics.roots.contains_key(&key),"a lookup invalidated by a manifest change cannot restore its old workspace");
     }
 
