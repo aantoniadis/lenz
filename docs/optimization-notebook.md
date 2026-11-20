@@ -2621,3 +2621,25 @@ physical presentation, live provider campaigns and indefinite leak freedom remai
 unverified. Existing Vim/installer gate failures whose exact cause could not be
 reproduced retain stronger diagnostics; the report distinguishes them from
 confirmed runtime defects and passing final validation.
+
+## PostgreSQL parser on its own stack — 2026-11-20
+
+libpg_query's depth check is inert (it never sets its stack base), so a left-deep expression such as
+`SELECT 1+1+…` within the 256 KiB SQL bound overflowed a 2 MiB reader-job stack and aborted Lenz Code.
+`postgres_assistance::diagnose` now runs the parse on a scoped thread with a 256 MiB stack reservation
+(owner-accepted trade-off). Release `postgres_assistance_measurements`, two 60-second runs per executable
+(the second pair back to back on a shared, loaded machine), 100 timed requests per operation:
+
+| Metric | Before (run 1 / run 2) | After (run 1 / run 2) |
+| --- | ---: | ---: |
+| Syntax check median | 0.0009 / 0.0010 ms | 0.030 / 0.033 ms |
+| Guarded formatting median (two checks) | 0.042 / 0.051 ms | 0.093 / 0.123 ms |
+| Stress RSS, last sample | 8.9 / 9.1 MiB | 9.0 / 8.9 MiB |
+| VmHWM | 8.9 / 9.1 MiB | 11.2 / 11.8 MiB |
+| VmPeak (address space) | 144 MiB | 464 MiB |
+
+Each check now pays a thread start and a 256 MiB mapping: about +30 µs, far below a frame. Settled RSS is
+unchanged. Five worst-case documents at the bound (`+1`×131,000, `::int`×52,000, `NOT `×9,990, `- `×9,990,
+`||1`×87,000), checked from a 2 MiB thread, complete in 0.11 s with a 106–108 MiB process peak, released
+when the parser thread ends; before the change each aborted the process. Not measured: the `dist` profile,
+native macOS, and first feedback through the full session.

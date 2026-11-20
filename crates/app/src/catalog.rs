@@ -71,7 +71,9 @@ pub enum Surface { Comparison, Merge, VersionPicker }
 /// What the window shows now; decides which entries exist and which values are current.
 #[derive(Clone, Copy, Debug)]
 pub struct Scope {
-    pub surface: Surface, pub repository: bool, pub pr: bool, pub image: bool, pub markdown: bool,
+    /// `image`: a rendering is on screen; `image_source`: an SVG whose rendering or source is shown, so the image
+    /// modes and Source stay offered while its source is on screen.
+    pub surface: Surface, pub repository: bool, pub pr: bool, pub image: bool, pub image_source: bool, pub markdown: bool,
     pub focused: bool,
     /// The pull request details tab on screen (`None`: the diff).
     pub pr_tab: Option<DetailsTab>,
@@ -87,7 +89,7 @@ pub struct Scope {
 impl Scope {
     /// A plain text comparison with default options.
     pub fn comparison() -> Self {
-        Self { surface: Surface::Comparison, repository: false, pr: false, focused: false, pr_tab: None, unified: false, image: false, markdown: false, options: Options::default(),
+        Self { surface: Surface::Comparison, repository: false, pr: false, focused: false, pr_tab: None, unified: false, image: false, image_source: false, markdown: false, options: Options::default(),
                scroll: ScrollMode::Shared, presentation: PresentationMode::Source, context_hidden: true, blame: false,
                image_mode: crate::image_session::Mode::TwoUp, markdown_layout: MarkdownLayout::Inline, find: None, sticky: true }
     }
@@ -189,9 +191,10 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
             out.extend([Interaction::Editor, Interaction::DefaultApp, Interaction::Reload].map(|x| i(x, G::File, None)));
             out.push(c(Command::LoadLarge, G::File, None));
             out.extend(FileAction::COMMANDS.iter().map(|&a| entry(Action::File(a), a.label(), G::File, None)));
-            if scope.image {
+            if scope.image || scope.image_source {
                 out.extend(crate::image_session::image_commands().iter().enumerate().map(|(n, e)| entry(Action::Image(n), e.label, G::View, None)));
-            } else {
+            }
+            if !scope.image {
                 if scope.markdown {
                     out.extend(markdown_views(scope).into_iter().map(|e| Entry { label: format!("View: {}", e.label).into(), ..e }));
                 }
@@ -239,16 +242,20 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
     out
 }
 
-/// The diff header's switch: Source | Preview for Markdown, the comparison modes for images, else nothing.
+/// The diff header's switch: Source | Preview for Markdown, the comparison modes for images (and Source for an
+/// SVG), else nothing.
 pub fn header_switch(scope: &Scope) -> Vec<Entry> {
     if scope.surface != Surface::Comparison { return Vec::new(); }
     // a PR's reading tab hides the diff, so its modes wait
     let mut out: Vec<Entry> = Vec::new();
     if scope.pr && scope.focused && scope.pr_tab.is_some() { return out; }
-    if scope.image {
+    if scope.image || scope.image_source {
+        use crate::image_session::{ImageCommand, Mode};
         out.extend(crate::image_session::image_commands().iter().enumerate().filter_map(|(n, e)| match e.command {
-            crate::image_session::ImageCommand::SetMode(mode) => Some(choice(Action::Image(n), mode.name().into(), Group::View, mode == scope.image_mode)),
-            _ => None,
+            ImageCommand::SetMode(Mode::Source) if !scope.image_source => None,
+            ImageCommand::SetMode(mode) => Some(choice(Action::Image(n), mode.name().into(), Group::View, mode == scope.image_mode)),
+            ImageCommand::CycleMode | ImageCommand::Fit | ImageCommand::ActualSize | ImageCommand::Nudge(_) | ImageCommand::Zoom { .. }
+            | ImageCommand::Pan { .. } | ImageCommand::SetSplit(_) | ImageCommand::Region { .. } => None,
         }));
     } else if scope.markdown { out.extend(markdown_views(scope)); }
     out
@@ -498,6 +505,14 @@ mod tests {
         assert_eq!(images.iter().map(|e| e.label.as_ref()).collect::<Vec<_>>(), ["2-up", "Swipe", "Onion skin", "Difference"]);
         assert_eq!(images.iter().filter(|e| e.current).count(), 1);
         assert!(images[1].current);
+        // an SVG adds its Source, which stays offered (and current) while the source replaces the rendering
+        let svg = header_switch(&Scope { image: true, image_source: true, ..Scope::comparison() });
+        assert_eq!(svg.iter().map(|e| e.label.as_ref()).collect::<Vec<_>>(), ["2-up", "Swipe", "Onion skin", "Difference", "Source"]);
+        let source = header_switch(&Scope { image_source: true, image_mode: crate::image_session::Mode::Source, ..Scope::comparison() });
+        assert_eq!(source.iter().map(|e| (e.label.as_ref(), e.current)).next_back(), Some(("Source", true)));
+        let e = entries(&Scope { image_source: true, image_mode: crate::image_session::Mode::Source, ..Scope::comparison() });
+        assert!(has(&e, Action::Interaction(Interaction::Find)) && e.iter().any(|e| matches!(e.action, Action::Comparison(Command::SetWhitespace(_)))));
+        assert!(e.iter().any(|e| matches!(e.action, Action::Image(_))), "the rendering's modes stay reachable");
         assert!(header_switch(&Scope { surface: Surface::Merge, markdown: true, ..Scope::comparison() }).is_empty());
     }
 

@@ -564,6 +564,9 @@ pub enum Command {
     RestartServer,
     /// Turn the active file's language server off (or on) for the browsing root, remembered.
     SetServerEnabled(bool),
+    /// Trust (or stop trusting) the browsing root's project tools, remembered: the project's own programs
+    /// (typescript-go's node_modules/.bin/tsc, a configured Python environment's interpreter) may run.
+    SetProjectToolsTrusted(bool),
     OpenServerInstall,
     StartServerInstall,
     CancelServerInstall,
@@ -891,6 +894,8 @@ pub enum CommandId {
     RebuildIndex,
     DisableServer,
     EnableServer,
+    TrustProjectTools,
+    UntrustProjectTools,
     ImageSource,
     MarkdownSource,
     /// The Markdown preview in the other pane, beside the source it follows.
@@ -1004,7 +1009,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 263] = [
+    pub const ALL: [CommandId; 265] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -1175,6 +1180,8 @@ impl CommandId {
         Self::RebuildIndex,
         Self::DisableServer,
         Self::EnableServer,
+        Self::TrustProjectTools,
+        Self::UntrustProjectTools,
         Self::CsvTable, Self::CsvHeader, Self::CsvFilter, Self::CsvSort, Self::CsvClearFilter, Self::CsvMoveLeft, Self::CsvMoveRight, Self::CsvDropColumn, Self::CsvEditCell,
         Self::ImageSource,
         Self::MarkdownSource,
@@ -1484,6 +1491,8 @@ impl CommandId {
             Self::RebuildIndex => "Rebuild Project Index",
             Self::DisableServer => "Disable Language Server for This Folder",
             Self::EnableServer => "Enable Language Server for This Folder",
+            Self::TrustProjectTools => "Trust Project Tools in This Folder",
+            Self::UntrustProjectTools => "Stop Trusting Project Tools in This Folder",
             Self::ImageSource => "Image Source / Rendered",
             Self::MarkdownSource => "Markdown Source / Preview",
             Self::PreviewBeside => "Open Markdown Preview to the Side",
@@ -3598,6 +3607,7 @@ impl Session {
         if self.csv_pending() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
         if (self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || self.install_running.is_some()) && matches!(id,
             CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
+            | CommandId::TrustProjectTools | CommandId::UntrustProjectTools
             | CommandId::RestartServer | CommandId::RebuildIndex | CommandId::ExcludeRubyTooling | CommandId::ResetProjectServerSettings) {
             return Some(if self.install_running.is_some() { "Waiting for the current installation to finish or stop" } else { "Waiting for language server settings to finish saving" });
         }
@@ -3872,6 +3882,13 @@ impl Session {
                 }
                 _ => None,
             },
+            CommandId::TrustProjectTools | CommandId::UntrustProjectTools => match self.state.project.as_ref() {
+                None => Some("No folder is open: open the project's folder to trust its tools"),
+                Some(p) if self.state.semantics.settings().trusted.contains(p.root()) == (id == CommandId::TrustProjectTools) => {
+                    Some(if id == CommandId::TrustProjectTools { "This folder's project tools are already trusted" } else { "This folder's project tools are not trusted" })
+                }
+                _ => None,
+            },
             CommandId::Completion | CommandId::ParameterInfo | CommandId::QuickFix | CommandId::FormatDocument | CommandId::OrganizeImports if self.text_action_disabled(id).is_some() => self.text_action_disabled(id),
             CommandId::Completion | CommandId::ParameterInfo | CommandId::FormatDocument if current.as_ref().is_some_and(|d| d.language() == Some(Language::Sql)) => self.sql_action_disabled(id),
             CommandId::OrganizeImports if current.as_ref().is_some_and(|d| d.language() == Some(Language::Sql)) => Some("SQL files have no imports to organize"),
@@ -3974,6 +3991,11 @@ impl Session {
                 CommandId::DisableServer
             },
             CommandId::WorkspaceRoot,
+            if self.state.project.as_ref().is_some_and(|p| self.state.semantics.settings().trusted.contains(p.root())) {
+                CommandId::UntrustProjectTools
+            } else {
+                CommandId::TrustProjectTools
+            },
             CommandId::ServerRuntime,
             CommandId::ExcludeRubyTooling,
             CommandId::ResetProjectServerSettings,
@@ -4176,7 +4198,7 @@ impl Session {
             if let Some(root) = &v.root {
                 rows.push(format!("Workspace: {}", root.display()));
             }
-            if let Some(Ok(environment)) = &v.environment {
+            if let Some(Ok(environment)) = v.environment.as_ref().filter(|e| e.as_ref().is_ok_and(|e| !e.is_empty())) {
                 rows.push(environment.clone());
             }
             if let Some(p) = semantics::provider::PROVIDERS
@@ -6131,6 +6153,16 @@ impl Session {
                 self.synced = 0;
                 repaint
             }
+            Command::SetProjectToolsTrusted(trusted) => {
+                if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
+                let Some(browse) = self.state.project.as_ref().map(|p| p.root().to_owned()) else { return Effect::default() };
+                self.state.asking = None;
+                self.cancel_semantic_analysis();
+                let settings = self.state.semantics.set_trusted(browse, trusted);
+                self.save_provider_settings(settings);
+                self.synced = 0;
+                repaint
+            }
             Command::CancelSemantic => {
                 let asked = self.state.asking.take().is_some() | self.cancel_format_by_user();
                 self.state.semantics.cancel();
@@ -6685,7 +6717,7 @@ impl Session {
             let (tx, browse) = (tx.clone(), browse.clone());
             jobs.submit(Priority::Background, move || {
                 let root = over.or_else(|| (semantics::provider::PROVIDERS[provider].root)(&file, browse.as_deref()));
-                let serve = root.as_deref().map_or(provider, |r| semantics::provider::serving(provider, r, &settings));
+                let serve = root.as_deref().map_or(provider, |r| semantics::provider::serving(provider, r, &settings, browse.as_deref()));
                 let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir, root, serve }));
             });
         };
@@ -10754,10 +10786,8 @@ fn repoint(dir: &Path, old: &Path, new: &Path) {
             // Saved state is small; anything larger than 4 MiB is not Lenz Code's and is left alone.
             let Some(text) = entry.metadata().ok().filter(|m| m.len() <= 4 << 20).and_then(|_| std::fs::read_to_string(&path).ok()) else { continue };
             if text.contains(&from) {
-                let temp = path.with_extension("json.moving");
-                if std::fs::write(&temp, text.replace(&from, &to)).and_then(|()| std::fs::rename(&temp, &path)).is_err() {
-                    let _ = std::fs::remove_file(&temp);
-                }
+                // Private like provider settings, keeping the file's own permissions.
+                let _ = semantics::provider::write_private(&path, text.replace(&from, &to).as_bytes(), || Ok(()));
             }
         }
     }

@@ -151,13 +151,18 @@ impl Controls {
                 }
             }
             if self.escape {
-                self.escape = false;
+                // As the parser: a C0 control other than CAN/SUB runs and DEL or an 8-bit byte is ignored, both
+                // without ending the escape, so the byte after them still decides whether a string begins.
                 if matches!(byte, b']' | b'P' | b'_' | b'^' | b'X') {
+                    self.escape = false;
                     self.string = true;
                     self.buffer.extend_from_slice(&[27, byte]);
-                } else if byte == 27 {
-                    self.escape = true;
+                } else if byte == 27 || byte >= 0x7f {
+                    // ESC starts the escape again; DEL and 8-bit bytes are dropped, as the parser ignores them.
+                } else if byte < 0x20 && !matches!(byte, 24 | 26) {
+                    output.push(byte);
                 } else {
+                    self.escape = false;
                     output.extend_from_slice(&[27, byte]);
                 }
             } else if byte == 27 {
@@ -913,6 +918,41 @@ mod tests {
         model.advance(b"\x1b[?1049l");
         assert!(model.frame().scrollback <= HISTORY_BYTES / CELL_BUDGET / 512);
     }
+    /// The parser stays in its escape state over C0 controls (but CAN/SUB), DEL and 8-bit bytes: whatever byte follows
+    /// ESC, no title or hyperlink string reaches it past the allowlist and the size cap.
+    #[test]
+    fn terminal_controls_after_every_escape_second_byte_cannot_smuggle_a_string() {
+        #[derive(Default)]
+        struct Oscs(Vec<Vec<u8>>);
+        impl alacritty_terminal::vte::Perform for Oscs {
+            fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+                self.0.push(params.first().copied().unwrap_or_default().to_vec());
+            }
+        }
+        let long = "x".repeat(MAX_CONTROL * 2);
+        for second in 0..=255u8 {
+            let mut bytes = Vec::new();
+            for string in [format!("]0;{long}\x07"), format!("]8;;https://example.invalid/{long}\x1b\\A")] {
+                bytes.extend_from_slice(&[27, second]);
+                bytes.extend_from_slice(string.as_bytes());
+            }
+            let mut filtered = Vec::new();
+            Controls::default().filter(&bytes, &mut filtered);
+            let mut oscs = Oscs::default();
+            alacritty_terminal::vte::Parser::new().advance(&mut oscs, &filtered);
+            assert_eq!(oscs.0, Vec::<Vec<u8>>::new(), "second byte {second:#04x}");
+            let mut model = Model::new((0xffffff, 0));
+            model.advance(&bytes);
+            let grid = model.term.grid();
+            for line in 0..grid.screen_lines() {
+                for column in 0..grid.columns() {
+                    let cell = &grid[Point::new(Line(line as i32), Column(column))];
+                    assert!(cell.hyperlink().is_none(), "second byte {second:#04x}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn terminal_model_nested_osc_and_ignored_controls_cannot_retain_hyperlinks() {
         let mut model = Model::new((0xffffff, 0));

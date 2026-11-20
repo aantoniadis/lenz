@@ -46,6 +46,8 @@ bzip2 = "0.6"
 lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz", "optimization"] }
 ruzstd = "0.9.1"
 crc32fast = "1.5"
+# Archive member identity (src/archive.rs); already built for code-core.
+sha2 = "0.11.1"
 # Private, exclusively created files for atomic saves and Git merge inputs.
 tempfile = "3"
 async-channel = "2.5.0"

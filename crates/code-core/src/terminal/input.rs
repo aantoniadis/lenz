@@ -45,12 +45,12 @@ pub(crate) fn quote_paths(paths: &[PathBuf]) -> Result<String, String> {
                 "Choose an absolute file path without control characters; nothing was sent".into(),
             );
         }
-        // Count the shell quoting expansion before allocating the next path.
+        // Count the shell quoting expansion before allocating the next path: each ' and \ becomes four bytes.
         let size = text
             .len()
             .saturating_add(
                 text.bytes()
-                    .filter(|c| *c == b'\'')
+                    .filter(|c| matches!(c, b'\'' | b'\\'))
                     .count()
                     .saturating_mul(3),
             )
@@ -61,9 +61,8 @@ pub(crate) fn quote_paths(paths: &[PathBuf]) -> Result<String, String> {
         if !quoted.is_empty() {
             quoted.push(' ');
         }
-        quoted.push('\'');
-        quoted.push_str(&text.replace('\'', "'\\''"));
-        quoted.push('\'');
+        // One literal word in POSIX shells and fish, whichever $SHELL the terminal runs.
+        quoted.push_str(&lenz_content::open::shell_word(text));
     }
     Ok(quoted)
 }
@@ -300,6 +299,13 @@ mod tests {
             .unwrap(),
             "'/tmp/it'\\''s here.sql' '/tmp/-script.sh'"
         );
+        // fish reads \' and \\ as escapes inside single quotes: a backslash is quoted outside them too.
+        assert_eq!(
+            quote_paths(&[PathBuf::from(r"/p/x\';echo INJECTED;#")]).unwrap(),
+            r"'/p/x'\\''\'';echo INJECTED;#'"
+        );
+        // The expansion check counts backslashes: each becomes four bytes.
+        assert!(quote_paths(&[PathBuf::from(format!("/{}", "\\".repeat(MAX_PASTE / 4)))]).is_err());
         assert!(quote_paths(&[PathBuf::from("/tmp/first"), PathBuf::from("/tmp/a\nb")]).is_err());
         assert!(quote_paths(&[]).is_err());
     }

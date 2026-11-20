@@ -30,7 +30,12 @@ pub struct Diagnostic {
     pub byte_offset: Option<usize>,
 }
 
-/// PostgreSQL syntax only, never database validation. Positions are UTF-8 bytes.
+/// libpg_query never sets its stack base, so its depth check is inert, and `1+1+...` nests one level per two bytes:
+/// this stack holds the deepest tree the 256 KiB assistance cap admits (measured). Pages are committed only as used.
+const PARSER_STACK: usize = 256 << 20;
+
+/// PostgreSQL syntax only, never database validation. Positions are UTF-8 bytes. The parser runs on its own thread
+/// with [`PARSER_STACK`], whatever thread calls this.
 pub fn diagnose(sql: &str) -> Result<(), Diagnostic> {
     if let Some(byte_offset) = sql.find('\0') {
         return Err(Diagnostic {
@@ -38,7 +43,21 @@ pub fn diagnose(sql: &str) -> Result<(), Diagnostic> {
             byte_offset: Some(byte_offset),
         });
     }
-    pg_parse::normalize(sql).map(|_| ()).map_err(|error| {
+    let parsed = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("lenz-pg-parse".into())
+            .stack_size(PARSER_STACK)
+            .spawn_scoped(scope, || pg_parse::normalize(sql).map(|_| ()))
+            .ok()
+            .and_then(|parser| parser.join().ok())
+    });
+    let Some(parsed) = parsed else {
+        return Err(Diagnostic {
+            message: "PostgreSQL syntax check could not run".into(),
+            byte_offset: None,
+        });
+    };
+    parsed.map_err(|error| {
         let byte_offset = match &error {
             pg_parse::Error::ParseError { cursorpos, .. } if *cursorpos > 0 => {
                 let character = usize::try_from(*cursorpos - 1).ok();

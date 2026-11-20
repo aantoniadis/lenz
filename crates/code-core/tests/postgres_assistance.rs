@@ -162,6 +162,30 @@ fn malformed_and_deep_documents_return_errors_without_panicking() {
     assert!(format("SELECT $tag$unterminated").is_err());
 }
 
+/// libpg_query's own depth check never fires: left-deep trees as long as the 256 KiB cap admits must end in a
+/// result, not a stack overflow, when checked from a 2 MiB worker thread as the session's reader jobs are.
+#[test]
+fn documents_as_deep_as_the_size_cap_admits_are_checked_from_a_small_worker_stack() {
+    use code_core::postgres_assistance::diagnose;
+    let cases = [
+        format!("SELECT 1{}", "+1".repeat(131_000)),
+        format!("SELECT 1{}", "::int".repeat(52_000)),
+        format!("SELECT {}true", "NOT ".repeat(9_990)),
+        format!("SELECT {}1", "- ".repeat(9_990)),
+        format!("SELECT 1{}", "||1".repeat(87_000)),
+    ];
+    for sql in cases {
+        assert!(sql.len() <= 262_144);
+        let result = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || diagnose(&sql).map_err(|d| d.message))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(result, Ok(()));
+    }
+}
+
 #[test]
 fn query_local_completion_works_in_predicates_and_preserves_string_newline_semantics() {
     use code_core::postgres_assistance::{diagnose, format};

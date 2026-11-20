@@ -1106,7 +1106,7 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::LanguageServer);
     draw(&mut a, 100, 26);
-    assert_eq!(a.choices().len(), 10);
+    assert_eq!(a.choices().len(), 11);
     assert!(a.choices().iter().all(|c| matches!(c.target, ChoiceTarget::Action(_))));
     let (x, y) = (a.layout.modal_rows.x, a.layout.modal_rows.y);
     click(&mut a, x, y);
@@ -1181,6 +1181,26 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
             .state()
             .provider()
             .is_some_and(|v| matches!(v.status, Status::Missing(_)))
+    });
+    // The folder's project tools are trusted, then no longer, from the same menu: the row follows the state.
+    settle(&mut a, |a| a.session.disabled(CommandId::TrustProjectTools).is_none());
+    key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
+    draw(&mut a, 80, 24);
+    activate(&mut a, CommandId::TrustProjectTools);
+    settle(&mut a, |a| a.session.disabled(CommandId::UntrustProjectTools).is_none());
+    key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
+    draw(&mut a, 80, 24);
+    assert!(a.choices().iter().any(|c| matches!(
+        c.target,
+        ChoiceTarget::Action(CommandId::UntrustProjectTools)
+    ) && c.disabled.is_none()));
+    activate(&mut a, CommandId::UntrustProjectTools);
+    settle(&mut a, |a| {
+        a.session.disabled(CommandId::TrustProjectTools).is_none()
+            && a.session
+                .state()
+                .provider()
+                .is_some_and(|v| matches!(v.status, Status::Missing(_)))
     });
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     assert_eq!(a.session.state().selection(), selected);
@@ -4032,6 +4052,27 @@ fn the_git_menu_compares_the_working_tree_in_this_terminal() {
     assert!(a.modal.is_none() && a.session.state().branches().is_none());
     assert_eq!(a.session.branch_label().as_deref(), Some("⎇ main"), "nothing checked out");
     assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "main\n");
+}
+
+#[test]
+fn compare_with_base_never_hands_lenz_diff_a_subcommand_from_origin_head() {
+    use lenz_content::git::testing::{git, write};
+    let (r, _wt, mut a) = branches_app();
+    let _bin = lenz_diff_beside(&mut a);
+    git(r.path(), &["switch", "-q", "other"]);
+    git(r.path(), &["branch", "-q", "-D", "main"]);
+    let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+    for target in ["pr", "merge", "--about"] {
+        write(r.path(), &format!(".git/{target}"), format!("{sha}\n"));
+        write(r.path(), ".git/refs/remotes/origin/HEAD", format!("ref: {target}\n"));
+        a.run(CommandId::CompareWithBase);
+        assert_eq!(foreground_args(&mut a), None, "{target}");
+        assert!(a.session.status_message().contains("no main or master branch"), "{target}: {}", a.session.status_message());
+    }
+    git(r.path(), &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+    git(r.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
+    a.run(CommandId::CompareWithBase);
+    assert_eq!(foreground_args(&mut a), Some(vec!["refs/remotes/origin/trunk".to_string()]));
 }
 
 #[test]

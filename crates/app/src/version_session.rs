@@ -333,8 +333,9 @@ pub fn open_files(
     }))
 }
 
+/// For the user's own shell: the path is one literal word in POSIX shells and fish.
 fn submodule_command(path: &str, sha: &str) -> String {
-    let path = format!("'{}'", path.replace('\'', r"'\''"));
+    let path = lenz_content::open::shell_word(path);
     format!("git -C {path} checkout {sha} && git add -- {path}")
 }
 
@@ -442,8 +443,13 @@ pub fn open_conflict(root: &Path, file: &crate::conflicts::ConflictedFile) -> Op
                             .map(|l| format!("  {l}")),
                     );
                 }
-                for (label, sha) in [("Theirs", &b), ("Ours", &a)] {
-                    o.info.push(format!("$ {}   ({label})", submodule_command(&file.path, sha)));
+                // A pasted control character acts as typing in the shell, whatever the quoting.
+                if file.path.chars().any(char::is_control) {
+                    o.info.push("No command to copy: the submodule path holds control characters".into());
+                } else {
+                    for (label, sha) in [("Theirs", &b), ("Ours", &a)] {
+                        o.info.push(format!("$ {}   ({label})", submodule_command(&file.path, sha)));
+                    }
                 }
             }
         }
@@ -820,7 +826,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let capture = dir.path().join("args");
         let sha = "0123456789abcdef";
-        for path in ["module$(touch INJECTED)", "-module's   (space)"] {
+        // fish reads \' and \\ as escapes inside single quotes: neither is left inside them.
+        assert_eq!(
+            submodule_command(r"sub\'; touch INJECTED # \\", sha),
+            format!(r"git -C 'sub'\\''\''; touch INJECTED # '\\''\\'' checkout {sha} && git add -- 'sub'\\''\''; touch INJECTED # '\\''\\''")
+        );
+        for path in ["module$(touch INJECTED)", "-module's   (space)", r"sub\'; touch INJECTED # \\"] {
             let command = submodule_command(path, sha);
             let target = dir.path().join("unused");
             let picker = PickerState::new(Opened {
@@ -839,6 +850,34 @@ mod tests {
             assert!(!dir.path().join("INJECTED").exists());
             std::fs::remove_file(&capture).unwrap();
         }
+    }
+
+    #[test]
+    fn submodule_paths_with_control_characters_offer_no_command_to_copy() {
+        use crate::git::testing::{git, repo, try_git};
+        let dir = repo();
+        let d = dir.path();
+        let (quoted, control) = (r"sub\'; touch INJECTED #", "sub\u{15}touch INJECTED\nx");
+        let commit = |digit: &str, message: &str| {
+            for path in [quoted, control] {
+                git(d, &["update-index", "--add", "--cacheinfo", &format!("160000,{},{path}", digit.repeat(40))]);
+            }
+            git(d, &["commit", "-q", "--no-verify", "-m", message]);
+        };
+        commit("1", "base");
+        git(d, &["checkout", "-q", "-b", "other"]);
+        commit("2", "other");
+        git(d, &["checkout", "-q", "main"]);
+        commit("3", "main");
+        assert!(!try_git(d, &["merge", "-q", "other"]));
+        let files = crate::conflicts::list(d).unwrap();
+        let open = |path: &str| open_conflict(d, files.iter().find(|f| f.path == path).unwrap());
+        let commands = |o: &Opened| o.info.iter().filter(|l| l.starts_with("$ ")).count();
+        assert_eq!(commands(&open(quoted)), 2);
+        let refused = open(control);
+        assert_eq!(commands(&refused), 0, "{:?}", refused.info);
+        assert!(refused.info.iter().any(|l| l.contains("control characters")));
+        assert!(!d.join("INJECTED").exists());
     }
 
     #[test]

@@ -939,7 +939,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     assert!(f.view.read_with(&v, |r, _| !r.session().state().server_install().unwrap().running));
     v.simulate_keystrokes("escape f2 home");
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
-    assert!(f.view.read_with(&v, |r, _| r.server_rows().len() == 10 && r.server_rows().iter().all(|(_, id)| id.is_some())));
+    assert!(f.view.read_with(&v, |r, _| r.server_rows().len() == 11 && r.server_rows().iter().all(|(_, id)| id.is_some())));
     let button = f.view.read_with(&v, |r, _| { let l = r.modal_layout().unwrap(); l.bounds.origin + point(px(20.0), px(l.body_top + line_h() / 2.0)) });
     v.simulate_click(button, Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { title: "Server details", .. }))));
@@ -985,6 +985,20 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     activate(&mut v, CommandId::EnableServer);
     drop(v);
     settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_)))
+        && r.session().disabled(CommandId::RestartServer).is_none() && r.session().disabled(CommandId::TrustProjectTools).is_none());
+    // The folder's project tools are trusted, then no longer, from the same menu: the row follows the state.
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("f2");
+    activate(&mut v, CommandId::TrustProjectTools);
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::UntrustProjectTools).is_none());
+    assert!(f.view.read_with(cx, |r, _| r.server_rows().iter().any(|(_, id)| *id == Some(CommandId::UntrustProjectTools))));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("f2");
+    activate(&mut v, CommandId::UntrustProjectTools);
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::TrustProjectTools).is_none()
+        && r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_)))
         && r.session().disabled(CommandId::RestartServer).is_none());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("f2");
@@ -7049,6 +7063,29 @@ fn gui_the_git_menu_compares_the_working_tree(cx: &mut TestAppContext) {
     assert_eq!(launched_args(&mut v, &f)[3], ["HEAD"]);
     assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ main"), "nothing checked out");
     assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n");
+}
+
+#[gpui::test]
+fn gui_compare_with_base_never_hands_lenz_diff_a_subcommand_from_origin_head(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{git, write};
+    let (f, _wt) = branches_fixture(cx);
+    let _bin = lenz_diff_beside(cx, &f);
+    let mut v = visual(cx, &f);
+    let d = f.dir.path();
+    git(d, &["switch", "-q", "other"]);
+    git(d, &["branch", "-q", "-D", "main"]);
+    let sha = git(d, &["rev-parse", "HEAD"]).trim().to_string();
+    for target in ["pr", "merge", "--about"] {
+        write(d, &format!(".git/{target}"), format!("{sha}\n"));
+        write(d, ".git/refs/remotes/origin/HEAD", format!("ref: {target}\n"));
+        f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithBase, w, cx));
+        assert!(launched_args(&mut v, &f).is_empty(), "{target}");
+        assert!(f.view.read_with(&v, |r, _| r.status()).contains("no main or master branch"), "{target}");
+    }
+    git(d, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+    git(d, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithBase, w, cx));
+    assert_eq!(launched_args(&mut v, &f), [vec!["refs/remotes/origin/trunk".to_string()]]);
 }
 
 #[gpui::test]

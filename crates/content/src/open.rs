@@ -97,6 +97,8 @@ pub fn plan_with(host: &Host, target: &Target, configured: Option<&str>, default
     }
     match terminal(host, &argv, target.cwd) {
         Some(launch) => Plan { launch: Launch { cwd, ..launch }, toast: None },
+        // On macOS only Terminal.app refuses: its shell would read a control character as typing.
+        None if host.macos => system(Some(format!("Terminal.app cannot run {} on a path with control characters; set $TERMINAL", editor[0]))),
         None => system(Some(format!("No terminal found to run {}; set $TERMINAL", editor[0]))),
     }
 }
@@ -210,13 +212,14 @@ fn gui_editor(program: &str) -> bool {
 }
 
 /// A terminal window running `command`: Linux tries `$TERMINAL`, `xdg-terminal-exec`, then known terminals on PATH;
-/// macOS uses `$TERMINAL` when set, else Terminal.app. `None` when Linux has no terminal at all.
+/// macOS uses `$TERMINAL` when set, else Terminal.app. `None` when Linux has no terminal at all, or Terminal.app
+/// would get a control character.
 pub fn terminal(host: &Host, command: &[String], cwd: Option<&Path>) -> Option<Launch> {
     if let Some(term) = host.get("TERMINAL").map(|t| split(&t)).filter(|t| !t.is_empty()) {
         return Some(in_terminal(&term, command));
     }
     if host.macos {
-        return Some(terminal_app(command, cwd));
+        return terminal_app(command, cwd);
     }
     ["xdg-terminal-exec", "ghostty", "kitty", "alacritty", "foot", "wezterm", "gnome-terminal", "konsole"]
         .into_iter()
@@ -236,16 +239,36 @@ fn in_terminal(term: &[String], command: &[String]) -> Launch {
     Launch { program: term[0].clone(), args: args.collect(), cwd: None }
 }
 
-/// Terminal.app running `command` through `osascript`: shell-quoted, then escaped into an AppleScript string.
-fn terminal_app(command: &[String], cwd: Option<&Path>) -> Launch {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-    let mut shell = command.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
-    if let Some(dir) = cwd {
-        shell = format!("cd {} && {shell}", quote(&dir.to_string_lossy()));
+/// Terminal.app running `command` through `osascript`: shell-quoted, then escaped into an AppleScript string. The
+/// login shell parses it as typed input, so `None` when a word or `cwd` holds a control character.
+fn terminal_app(command: &[String], cwd: Option<&Path>) -> Option<Launch> {
+    let dir = cwd.map(|d| d.to_string_lossy());
+    if command.iter().map(String::as_str).chain(dir.as_deref()).any(|w| w.chars().any(char::is_control)) {
+        return None;
+    }
+    let mut shell = command.iter().map(|a| shell_word(a)).collect::<Vec<_>>().join(" ");
+    if let Some(dir) = dir {
+        shell = format!("cd {} && {shell}", shell_word(&dir));
     }
     let script = shell.replace('\\', r"\\").replace('"', r#"\""#);
     let args = ["-e", &format!(r#"tell application "Terminal" to do script "{script}""#), "-e", r#"tell application "Terminal" to activate"#];
-    Launch { program: "osascript".into(), args: args.map(String::from).to_vec(), cwd: None }
+    Some(Launch { program: "osascript".into(), args: args.map(String::from).to_vec(), cwd: None })
+}
+
+/// `s` as one literal word for POSIX shells and fish: single-quoted, with each `'` and `\` outside the quotes as
+/// `\'` and `\\`, since fish reads both as escapes inside single quotes. Control characters are the caller's to refuse.
+pub fn shell_word(s: &str) -> String {
+    let mut word = String::with_capacity(s.len() + 2);
+    word.push('\'');
+    for c in s.chars() {
+        match c {
+            '\'' => word.push_str(r"'\''"),
+            '\\' => word.push_str(r"'\\'"),
+            c => word.push(c),
+        }
+    }
+    word.push('\'');
+    word
 }
 
 /// Starts `launch` detached: no stdio, its own process group, reaped by a thread.
@@ -425,10 +448,31 @@ mod tests {
     fn macos_uses_terminal_app_with_quoted_command() {
         let cmd = words(&["nvim", "+3", r#"/Users/a/it's "q" \ x.rs"#]);
         let got = terminal(&host(&[], &["kitty"], true), &cmd, Some(Path::new("/Users/a/my repo"))).unwrap();
-        let script = r#"tell application "Terminal" to do script "cd '/Users/a/my repo' && 'nvim' '+3' '/Users/a/it'\\''s \"q\" \\ x.rs'""#;
+        let script = r#"tell application "Terminal" to do script "cd '/Users/a/my repo' && 'nvim' '+3' '/Users/a/it'\\''s \"q\" '\\\\' x.rs'""#;
         assert_eq!(got, launch("osascript", &["-e", script, "-e", r#"tell application "Terminal" to activate"#]));
         // $TERMINAL still wins on macOS
         assert_eq!(terminal(&host(&[("TERMINAL", "alacritty")], &[], true), &cmd, None).unwrap().program, "alacritty");
+        // A control character in any word or the folder is refused: the login shell would read it as typing.
+        let mac = host(&[], &[], true);
+        assert_eq!(terminal(&mac, &words(&["vi", "/r/a\u{15}touch PWNED\nb"]), None), None);
+        assert_eq!(terminal(&mac, &words(&["vi", "/r/a"]), Some(Path::new("/r\n"))), None);
+        let t = Target { cwd: Some(Path::new("/r")), ..target("/r/a\u{15}b.rs") };
+        let refused = plan(&host(&[("EDITOR", "vi")], &[], true), &t, false);
+        assert_eq!(refused.launch.program, "open", "the system default app, without a shell");
+        assert!(refused.toast.unwrap().contains("control characters"));
+    }
+
+    #[test]
+    fn shell_words_stay_one_literal_word_in_posix_shells_and_fish() {
+        assert_eq!(shell_word("plain"), "'plain'");
+        // fish reads `\'` and `\\` as escapes inside single quotes, so neither character is ever left inside them.
+        assert_eq!(shell_word(r"/p/x\';echo INJECTED;#"), r"'/p/x'\\''\'';echo INJECTED;#'");
+        let name = r"sub\'; touch PWNED # $HOME \\ `x`";
+        let word = shell_word(name);
+        let dir = tempfile::tempdir().unwrap();
+        let out = Command::new("sh").current_dir(dir.path()).arg("-c").arg(format!("printf %s {word}")).output().unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), name, "POSIX shells read the word back unchanged");
+        assert!(!dir.path().join("PWNED").exists());
     }
 
     #[test]

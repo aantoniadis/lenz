@@ -383,4 +383,36 @@ mod tests {
         assert!(text(&state).contains("Loading commits")||text(&state).contains("wants to merge"));
     }
 
+    #[test]
+    fn a_forge_url_that_looks_like_an_option_is_refused_before_any_fetch() {
+        use crate::git::testing::{commit_all, git, repo, write};
+        let root = repo();
+        write(root.path(), "a.txt", "one\n");
+        commit_all(root.path(), "One");
+        write(root.path(), "a.txt", "two\n");
+        commit_all(root.path(), "Two");
+        let _provider = pr::test_support::markdown_provider(root.path());
+        assert!(open(root.path(), Some("9")).is_ok(), "the stand-in's own URL fetches");
+        let dir = root.path().join(".git/markdown-provider");
+        let refs = || git(root.path(), &["for-each-ref"]);
+        for protocol in ["https", "ssh"] {
+            let marker = root.path().join(format!(".git/{protocol}-marker"));
+            let payload = format!("--upload-pack=touch '{}';:", marker.display());
+            let urls = if protocol == "ssh" {
+                serde_json::json!({ "url": "https://lenz.invalid/o/r", "sshUrl": payload })
+            } else {
+                serde_json::json!({ "url": payload, "sshUrl": "git@lenz.invalid:o/r.git" })
+            };
+            std::fs::write(dir.join("repo.json"), urls.to_string()).unwrap();
+            let script = std::fs::read_to_string(dir.join("gh.sh")).unwrap();
+            let script = script.replace("git_protocol'*) echo https", "git_protocol'*) echo ssh");
+            if protocol == "ssh" {
+                std::fs::write(dir.join("gh.sh"), script).unwrap();
+            }
+            let before = refs();
+            assert!(matches!(open(root.path(), Some("9")), Err(pr::PrError::Gh(_))), "{protocol}");
+            assert!(!marker.exists(), "{protocol}: the forge's URL ran a command");
+            assert_eq!(refs(), before);
+        }
+    }
 }

@@ -393,6 +393,8 @@ impl Session {
             CommandId::ResetProjectServerSettings => Command::ResetProjectServerSettings,
             CommandId::DisableServer => Command::SetServerEnabled(false),
             CommandId::EnableServer => Command::SetServerEnabled(true),
+            CommandId::TrustProjectTools => Command::SetProjectToolsTrusted(true),
+            CommandId::UntrustProjectTools => Command::SetProjectToolsTrusted(false),
             CommandId::ImageSource => Command::ToggleImageSource,
             CommandId::MarkdownSource => Command::ToggleMarkdownSource,
             CommandId::PreviewBeside => Command::PreviewBeside,
@@ -611,7 +613,7 @@ impl CommandId {
             Self::ExtendSelection | Self::ShrinkSelection | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections => return G::Selections,
             Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown | Self::DuplicateLinesUp | Self::DuplicateLinesDown | Self::DeleteLine => return G::Lines,
             Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave => return G::EditingSettings,
-            Self::WorkspaceRoot | Self::ServerRuntime | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex => return G::ServerSetup,
+            Self::WorkspaceRoot | Self::ServerRuntime | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex | Self::TrustProjectTools | Self::UntrustProjectTools => return G::ServerSetup,
             Self::ConfigureSqlMetadata | Self::ConnectSqlMetadata | Self::RefreshSqlMetadata | Self::DisconnectSqlMetadata => return G::Metadata,
             Self::SqlDialect | Self::SqlDialectPostgreSql | Self::SqlDialectDuckDb | Self::SqlDialectFollowProject | Self::ProjectSqlDialectPostgreSql | Self::ProjectSqlDialectDuckDb | Self::ProjectSqlDialectUnset => return G::Dialect,
             Self::Keymap | Self::KeymapIntelliJ | Self::KeymapVsCode | Self::ResetKeymap => return G::Keybindings,
@@ -651,7 +653,7 @@ impl CommandId {
             | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion | Self::ParameterInfo | Self::QuickFix | Self::FormatDocument | Self::OrganizeImports => G::Selection,
             Self::InstallServer | Self::StartServerInstall | Self::CancelServerInstall | Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
-            | Self::DisableServer | Self::EnableServer => G::LanguageServers,
+            | Self::DisableServer | Self::EnableServer | Self::TrustProjectTools | Self::UntrustProjectTools => G::LanguageServers,
             Self::InspectChange | Self::ShowChangeDiff | Self::RevertChange | Self::CloseChange => G::Git,
             Self::ConfigureSqlMetadata | Self::ConnectSqlMetadata | Self::RefreshSqlMetadata | Self::DisconnectSqlMetadata | Self::SqlDialect | Self::SqlDialectPostgreSql | Self::SqlDialectDuckDb | Self::SqlDialectFollowProject
             | Self::ProjectSqlDialectPostgreSql | Self::ProjectSqlDialectDuckDb | Self::ProjectSqlDialectUnset => G::Sql,

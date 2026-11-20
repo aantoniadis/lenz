@@ -67,8 +67,9 @@ pub struct Provider {
     /// A server script inside VS Code's built-in extensions (relative to an extensions folder), run with `node`
     /// when the executable is not on PATH and the settings name none.
     pub bundled: Option<&'static str>,
-    /// Where its executable is for workspace `root` when the settings name none (else it is looked up on PATH).
-    pub locate: Option<fn(&Path, &Launch) -> Option<PathBuf>>,
+    /// Where its executable is for workspace `root` when the settings name none (else it is looked up on PATH); `Err`
+    /// says why none can run.
+    pub locate: Option<Locate>,
     /// Further `workspace/configuration` sections it reads besides `config_section`: each answered with the user's
     /// settings under that key, else an empty object when the flag says it needs one, else nothing (VS Code's HTML
     /// server stops validating a page when its `css` section is missing, and when its `js/ts` one is empty).
@@ -108,8 +109,12 @@ pub struct Provider {
     pub ignores: &'static [&'static str],
 }
 
-/// A provider's environment check: see [`Provider::environment`].
-pub type Environment = fn(&Path, &Value, Option<&std::ffi::OsStr>) -> Result<String, String>;
+/// A provider's own executable lookup: see [`Provider::locate`].
+pub type Locate = fn(&Path, &Launch) -> Result<PathBuf, String>;
+
+/// A provider's environment check: see [`Provider::environment`]. Its last argument is the opened folder the user
+/// trusts, holding the workspace (`None`: the project's own programs must not run).
+pub type Environment = fn(&Path, &Value, Option<&std::ffi::OsStr>, Option<&Path>) -> Result<String, String>;
 
 /// A request asking a server what to insert at the caret after a typed character (VS Code's HTML server closes the
 /// tag just opened: `html/autoInsert`). It answers a snippet, inserted as its own Undo step while the text and caret
@@ -216,7 +221,7 @@ Provider {
     config_section: "python",
     // The environment configured in pyrightconfig.json, [tool.pyright] or python.pythonPath, which must exist.
     environment: Some(super::python::describe),
-    limits: "Types and definitions come from Pyright's static analysis of the project and the Python environment named in Server Details: dynamic attributes, monkey patching and unresolved imports (packages not installed in that environment) are not followed; a configured environment that is missing stops it rather than letting it use another; it offers no formatting, quick fixes or organize imports (Format Document and Organize Imports run the project's configured ruff or black instead); files under hidden folders are not part of its workspace by default (no workspace symbols there); usages asked at a use leave out that use",
+    limits: "Types and definitions come from Pyright's static analysis of the project and the Python environment named in Server Details: dynamic attributes, monkey patching and unresolved imports (packages not installed in that environment) are not followed; a configured environment that is missing stops it rather than letting it use another; Lenz reads that environment's Python version from its pyvenv.cfg and runs a project environment's interpreter for it only in an opened folder you trust (Trust Project Tools in This Folder); it offers no formatting, quick fixes or organize imports (Format Document and Organize Imports run the project's configured ruff or black instead); files under hidden folders are not part of its workspace by default (no workspace symbols there); usages asked at a use leave out that use",
     ..DEFAULT
 },
 Provider {
@@ -236,7 +241,7 @@ Provider {
     // `tsserver.path` (a TypeScript with `lib/tsserver.js`) goes in the user's settings when the project has none.
     initialization: || json!({}),
     config_section: "typescript",
-    limits: "Navigation follows TypeScript's project model (tsconfig.json/jsconfig.json): files outside every project get a default one; plain JavaScript without types is resolved by inference; it needs a TypeScript with tsserver (TypeScript 6 or older: TypeScript 7 projects are served by typescript-go)",
+    limits: "Navigation follows TypeScript's project model (tsconfig.json/jsconfig.json): files outside every project get a default one; plain JavaScript without types is resolved by inference; it needs a TypeScript with tsserver (TypeScript 6 or older: TypeScript 7 projects are served by typescript-go); it loads the project's own TypeScript (node_modules/typescript/lib/tsserver.js) when there is one, as editors running it do, whether or not the folder is trusted",
     ..DEFAULT
 },
 // TypeScript 7's own language server (`tsc --lsp`), for workspaces where typescript-language-server finds no
@@ -251,13 +256,15 @@ Provider {
     // It names itself and its version when initialized (`typescript-go 7.0.2`).
     version: Version::Initialize,
     tested: Some("7.0.2"),
-    setup: "Install TypeScript 7 in the project (`npm install --save-dev typescript@7`) or globally (`npm install -g typescript@7`, which needs Node.js) so that its `tsc` is in the project's node_modules/.bin or on PATH, or set its `executable` and `env.PATH` in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
+    setup: "Install TypeScript 7 globally (`npm install -g typescript@7`, which needs Node.js) so that its `tsc` is on PATH, or set its `executable` and `env.PATH` in providers.json; a project's own `tsc` (TypeScript 7 in its node_modules/.bin) runs only after you open its folder and choose Trust Project Tools in This Folder; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
     root: typescript_root,
     no_root: "no TypeScript or JavaScript project encloses this file; set a workspace root",
     config_section: "typescript",
     locate: Some(go_executable),
+    // Says when the project's own `tsc` is not run because its folder is not trusted.
+    environment: Some(go_tools),
     origins: TYPESCRIPT_ORIGINS,
-    limits: "TypeScript 7's native language server, used where the project's TypeScript (else the installed one) is TypeScript 7: navigation follows TypeScript's project model (tsconfig.json/jsconfig.json); no type hierarchy from the server (the reader's own, from syntax, is used)",
+    limits: "TypeScript 7's native language server, used where the project's TypeScript (else the installed one) is TypeScript 7: navigation follows TypeScript's project model (tsconfig.json/jsconfig.json); the project's own `tsc` (node_modules/.bin) is the project's program and runs only in an opened folder you trust (Trust Project Tools in This Folder), else the one on PATH or named in providers.json does; no type hierarchy from the server (the reader's own, from syntax, is used)",
     ..DEFAULT
 },
 Provider {
@@ -508,7 +515,7 @@ fn yaml_downloads(settings: &Value) -> bool {
 }
 
 /// Where yaml-language-server's schemas come from, for Server Details: settings only, never a file's contents.
-fn yaml_schemas(_: &Path, settings: &Value, _: Option<&std::ffi::OsStr>) -> Result<String, String> {
+fn yaml_schemas(_: &Path, settings: &Value, _: Option<&std::ffi::OsStr>, _: Option<&Path>) -> Result<String, String> {
     let mappings = settings["schemas"].as_object().map_or(0, serde_json::Map::len);
     let mapped = match mappings {
         1 => "1 schema mapping in providers.json".to_owned(),
@@ -720,13 +727,14 @@ fn typescript_language_id(language: Language, path: &Path) -> &'static str {
     }
 }
 
-/// The provider serving workspace `root` for provider `p`'s languages (`p` is [`for_language`]'s): `p` itself,
-/// except that typescript-go serves TypeScript where typescript-language-server would find no TypeScript with
-/// tsserver and a TypeScript 7 `tsc` can run. Reads files and looks on PATH: call off the UI thread.
-pub fn serving(p: usize, root: &Path, settings: &Settings) -> usize {
+/// The provider serving workspace `root` for provider `p`'s languages (`p` is [`for_language`]'s) in browsing root
+/// `browse`: `p` itself, except that typescript-go serves TypeScript where typescript-language-server would find no
+/// TypeScript with tsserver and a TypeScript 7 `tsc` can run (or the project has one that runs once its folder is
+/// trusted). Reads files and looks on PATH: call off the UI thread.
+pub fn serving(p: usize, root: &Path, settings: &Settings, browse: Option<&Path>) -> usize {
     let go = || PROVIDERS.iter().position(|q| q.id == "typescript-go");
     match PROVIDERS[p].id {
-        "typescript-language-server" if typescript_go_serves(&PROVIDERS[p], root, settings) => go().unwrap_or(p),
+        "typescript-language-server" if typescript_go_serves(&PROVIDERS[p], root, settings, browse) => go().unwrap_or(p),
         _ => p,
     }
 }
@@ -738,10 +746,12 @@ pub fn primary(q: usize) -> usize {
 }
 
 /// typescript-language-server uses the tsserver its settings name, else the workspace's TypeScript, else the one
-/// installed beside it; TypeScript 7 has no tsserver. typescript-go serves when none of those has one and it can run.
-fn typescript_go_serves(tls: &Provider, root: &Path, settings: &Settings) -> bool {
+/// installed beside it; TypeScript 7 has no tsserver. typescript-go serves when none of those has one and it can run,
+/// or the project has its own TypeScript 7 `tsc` that is not trusted (its status then says how to trust it).
+fn typescript_go_serves(tls: &Provider, root: &Path, settings: &Settings, browse: Option<&Path>) -> bool {
     let Some(go) = PROVIDERS.iter().find(|q| q.id == "typescript-go") else { return false };
-    if go_executable(root, &settings.launch(go)).is_none() {
+    let launch = settings.launch_in(go, browse, root);
+    if go_executable(root, &launch).is_err() && (launch.executable != Path::new("tsc") || project_tsc(root, root).is_none()) {
         return false;
     }
     // A named tsserver it ignores when the file is not there, as it does.
@@ -758,15 +768,45 @@ fn typescript_go_serves(tls: &Provider, root: &Path, settings: &Settings) -> boo
 }
 
 /// typescript-go's executable for workspace `root`: the one its settings name, else a TypeScript 7 `tsc` (older
-/// ones have no `--lsp`): the project's own (`node_modules/.bin`, at the root or above), else on PATH.
-pub fn go_executable(root: &Path, launch: &Launch) -> Option<PathBuf> {
+/// ones have no `--lsp`): the project's own (`node_modules/.bin`, at the root or above but never above the trusted
+/// folder) when the launch trusts the opened folder, else on PATH. `Err`: why none can run.
+pub fn go_executable(root: &Path, launch: &Launch) -> Result<PathBuf, String> {
     if launch.executable != Path::new("tsc") {
-        return find_executable(&launch.executable, launch.path());
+        return find_executable(&launch.executable, launch.path()).ok_or_else(|| format!("`{}` was not found", launch.executable.display()));
     }
-    let seven = |version: Option<String>| version.and_then(|v| v.split('.').next()?.parse::<u32>().ok()).is_some_and(|major| major >= 7);
+    if let Some(tsc) = launch.trusted.as_deref().and_then(|t| project_tsc(root, t)) {
+        return Ok(tsc);
+    }
+    if let Some(tsc) = find_executable(Path::new("tsc"), launch.path()).filter(|e| major_seven(package_version(e, "typescript"))) {
+        return Ok(tsc);
+    }
+    Err(match project_tsc(root, root) {
+        Some(tsc) => format!("the project's own `tsc` ({}) is the project's program and runs only in an opened folder you trust: open the folder and choose Trust Project Tools in This Folder, or put a TypeScript 7 `tsc` on PATH", tsc.display()),
+        None if launch.trusted.is_some() => "no TypeScript 7 `tsc` it can run was found in the project's node_modules/.bin or on PATH".into(),
+        None => "no TypeScript 7 `tsc` it can run was found on PATH (a project's own node_modules/.bin/tsc runs only in an opened folder you trust)".into(),
+    })
+}
+
+/// Whether a `version` is TypeScript 7 or newer.
+fn major_seven(version: Option<String>) -> bool {
+    version.and_then(|v| v.split('.').next()?.parse::<u32>().ok()).is_some_and(|major| major >= 7)
+}
+
+/// The project's own TypeScript 7 `tsc` (`node_modules/.bin`) at `root` or above, never above `within`.
+fn project_tsc(root: &Path, within: &Path) -> Option<PathBuf> {
     // A project's `.bin/tsc` may be a script (pnpm), so its version is the package's beside it.
-    let local = root.ancestors().find(|d| d.join("node_modules/.bin/tsc").is_file() && seven(package_dir_version(&d.join("node_modules/typescript"))));
-    local.map(|d| d.join("node_modules/.bin/tsc")).or_else(|| find_executable(Path::new("tsc"), launch.path()).filter(|e| seven(package_version(e, "typescript"))))
+    root.ancestors().take_while(|d| d.starts_with(within))
+        .find(|d| d.join("node_modules/.bin/tsc").is_file() && major_seven(package_dir_version(&d.join("node_modules/typescript"))))
+        .map(|d| d.join("node_modules/.bin/tsc"))
+}
+
+/// typescript-go's line for Server Details: that the project's own `tsc` is not run in a folder that is not trusted
+/// (empty otherwise).
+fn go_tools(root: &Path, _: &Value, _: Option<&std::ffi::OsStr>, trusted: Option<&Path>) -> Result<String, String> {
+    Ok(match project_tsc(root, root).filter(|_| trusted.is_none()) {
+        Some(tsc) => format!("Project tools: the project's own `tsc` ({}) is not run, because this folder is not trusted; open the folder and choose Trust Project Tools in This Folder to use it", tsc.display()),
+        None => String::new(),
+    })
 }
 
 /// The `version` in the `package.json` of the npm package in `dir`.
@@ -794,21 +834,49 @@ fn typescript_root(file: &Path, browse: Option<&Path>) -> Option<PathBuf> {
 
 /// JDT LS's workspace: the outermost Maven, Gradle or Eclipse project file under the browsing root (it imports
 /// nested modules itself), else that browsing root; without one, the nearest, followed up through parent Maven or
-/// Gradle builds; else the file's folder.
+/// Gradle builds, but only through folders no other account can write to whose build files the opened file's owner
+/// owns; else the file's folder.
 fn java_root(file: &Path, browse: Option<&Path>) -> Option<PathBuf> {
     const BUILDS: [&str; 6] = ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".project"];
     let browse = browse.filter(|b| file.starts_with(b));
     let marked = |d: &Path| BUILDS.iter().any(|m| d.join(m).is_file());
-    let mut dirs = file.ancestors().skip(1).take_while(|d| browse.is_none_or(|b| d.starts_with(b))).filter(|d| marked(d));
     match browse {
-        Some(b) => Some(dirs.last().unwrap_or(b).to_owned()),
+        Some(b) => Some(file.ancestors().skip(1).take_while(|d| d.starts_with(b)).filter(|d| marked(d)).last().unwrap_or(b).to_owned()),
         None => {
-            let nearest = dirs.next();
+            // No folder chose the project: a build another account plants above the file (in /tmp) is never adopted.
+            let owner = file.ancestors().find_map(owner_of);
+            let own = |d: &&Path| closed_folder(d) && BUILDS.iter().map(|m| d.join(m)).filter(|f| f.symlink_metadata().is_ok()).all(|f| owned_by(&f, owner));
+            let nearest = file.ancestors().skip(1).take_while(own).find(|d| marked(d));
             let parent_build = |d: &&Path| ["pom.xml", "settings.gradle", "settings.gradle.kts"].iter().any(|m| d.join(m).is_file());
-            let outer = nearest.and_then(|n| n.ancestors().skip(1).take_while(parent_build).last());
+            let outer = nearest.and_then(|n| n.ancestors().skip(1).take_while(|d| own(d) && parent_build(d)).last());
             outer.or(nearest).or(file.parent()).map(Path::to_owned)
         }
     }
+}
+
+/// The account owning `path` (Unix), `None` elsewhere or when it cannot be read.
+fn owner_of(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    { std::fs::metadata(path).ok().map(|m| std::os::unix::fs::MetadataExt::uid(&m)) }
+    #[cfg(not(unix))]
+    { let _ = path; None }
+}
+
+/// Whether `path` itself (a link is not followed) belongs to `owner` and no other account can write to it (a link's
+/// own mode says nothing).
+fn owned_by(path: &Path, owner: Option<u32>) -> bool {
+    #[cfg(unix)]
+    { use std::os::unix::fs::MetadataExt; std::fs::symlink_metadata(path).is_ok_and(|m| Some(m.uid()) == owner && (m.file_type().is_symlink() || m.mode() & 0o002 == 0)) }
+    #[cfg(not(unix))]
+    { let _ = (path, owner); true }
+}
+
+/// Whether only its owner and group can write to folder `dir` (every account can write to `/tmp`).
+fn closed_folder(dir: &Path) -> bool {
+    #[cfg(unix)]
+    { use std::os::unix::fs::MetadataExt; std::fs::metadata(dir).is_ok_and(|m| m.mode() & 0o002 == 0) }
+    #[cfg(not(unix))]
+    { let _ = dir; true }
 }
 
 /// A stable name for a server's workspace-data folder: its root and launch (FNV-1a), so different projects or
@@ -951,6 +1019,10 @@ pub struct Launch {
     pub args: Vec<String>,
     /// Variables set on top of the reader's own environment.
     pub env: Vec<(String, String)>,
+    /// The opened folder holding the workspace, when the user trusts its project tools: the project's own programs
+    /// (typescript-go's `node_modules/.bin/tsc`, a configured Python environment's interpreter) may run, found no
+    /// higher than it. `None`: only PATH and these settings.
+    pub trusted: Option<PathBuf>,
 }
 
 impl Launch {
@@ -966,6 +1038,9 @@ impl Launch {
 pub struct Settings {
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, ProviderSettings>,
+    /// Opened folders whose project tools the user trusts to run (Trust Project Tools in This Folder).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub trusted: std::collections::BTreeSet<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1016,17 +1091,10 @@ impl Settings {
         lenz_content::theme::read_bounded(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
-    /// Best effort, atomically: a failed save loses the setting, never a project file.
+    /// Best effort, atomically: a failed save loses the setting, never a project file. Private (see [`write_private`]).
     pub fn save(&self, file: &Path) -> bool {
         let Some(dir) = file.parent() else { return false };
-        let temp = file.with_extension(format!("tmp-{}", std::process::id()));
-        let ok = std::fs::create_dir_all(dir).is_ok()
-            && serde_json::to_vec_pretty(self).is_ok_and(|json| std::fs::write(&temp, json).is_ok())
-            && std::fs::rename(&temp, file).is_ok();
-        if !ok {
-            let _ = std::fs::remove_file(&temp);
-        }
-        ok
+        std::fs::create_dir_all(dir).is_ok() && serde_json::to_vec_pretty(self).is_ok_and(|json| write_private(file, &json, || Ok(())).is_ok())
     }
 
     /// How `provider` is launched: its defaults, overridden by these settings.
@@ -1036,6 +1104,7 @@ impl Settings {
             executable: s.and_then(|s| s.executable.clone()).unwrap_or_else(|| provider.executable.into()),
             args: s.and_then(|s| s.args.clone()).unwrap_or_else(|| provider.args.iter().map(|a| a.to_string()).collect()),
             env: s.map(|s| s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default(),
+            trusted: None,
         };
         if super::installer::node_package(provider.id).is_some()
             && let Some(bin) = s.and_then(|s| s.node.as_deref()).and_then(Path::parent)
@@ -1051,6 +1120,17 @@ impl Settings {
             }
         }
         launch
+    }
+
+    /// How `provider` is launched for workspace `root` in browsing root `browse`: [`Self::launch`], trusting the
+    /// project's own tools when the user trusts that folder and it holds the workspace.
+    pub fn launch_in(&self, provider: &Provider, browse: Option<&Path>, root: &Path) -> Launch {
+        Launch { trusted: self.trusted_root(browse).filter(|b| root.starts_with(b)).map(Path::to_owned), ..self.launch(provider) }
+    }
+
+    /// Browsing root `browse` when the user trusts its project tools; `None` with no folder open.
+    pub fn trusted_root<'a>(&self, browse: Option<&'a Path>) -> Option<&'a Path> {
+        browse.filter(|b| self.trusted.contains(*b))
     }
 
     /// `provider`'s `initializationOptions`: its defaults with the user's settings merged over them, object by
@@ -1132,7 +1212,7 @@ pub fn set_ruby_tooling_excluded(file: &Path, root: &Path, enabled: bool) -> Res
     update_settings(file, "ruby-lsp", "Ruby project", |provider| {
         let typed = serde_json::from_value::<ProviderSettings>(Value::Object(provider.clone()))
             .map_err(|e| format!("Invalid Ruby provider settings: {e}"))?;
-        let settings = Settings { providers: [("ruby-lsp".into(), typed)].into_iter().collect() };
+        let settings = Settings { providers: [("ruby-lsp".into(), typed)].into_iter().collect(), ..Settings::default() };
         let (_, ruby) = for_language(Language::Ruby).ok_or("Ruby provider is unavailable")?;
         let options = settings.initialization(ruby, Some(root));
         let indexing = options.get("indexing");
@@ -1225,6 +1305,21 @@ pub(super) fn update_settings(
         .ok_or("Provider settings have no parent folder")?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("Cannot create provider settings folder: {e}"))?;
+    write_private(file, &bytes, || {
+        if lenz_content::theme::read_bounded(file).ok() != original {
+            return Err(std::io::Error::other(
+                "Provider settings changed; try again",
+            ));
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("Could not save {label} settings: {e}"))
+}
+
+/// Replace `file` with `bytes` atomically, through a temporary file created private (0600: providers' `env` may hold
+/// secrets) that keeps an existing file's permissions; `check` runs right before the rename, and its error leaves
+/// `file` as it was.
+pub(crate) fn write_private(file: &Path, bytes: &[u8], check: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp = file.with_extension(format!(
         "runtime-{}-{}.tmp",
@@ -1241,19 +1336,14 @@ pub(super) fn update_settings(
         if let Ok(metadata) = std::fs::metadata(file) {
             output.set_permissions(metadata.permissions())?;
         }
-        output.write_all(&bytes)?;
-        if lenz_content::theme::read_bounded(file).ok() != original {
-            return Err(std::io::Error::other(
-                "Provider settings changed; try again",
-            ));
-        }
+        output.write_all(bytes)?;
+        check()?;
         std::fs::rename(&temp, file)
     })();
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(temp);
-        return Err(format!("Could not save {label} settings: {e}"));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -1477,8 +1567,12 @@ mod tests {
         };
         let (tls, _) = for_language(Language::TypeScript).unwrap();
         let go = PROVIDERS.iter().position(|p| p.id == "typescript-go").unwrap();
-        let serving = |root: &str, s: &Settings| PROVIDERS[serving(tls, &w.join(root), s)].id;
+        // No folder open: nothing of the project's runs.
+        let serving = |root: &str, s: &Settings| PROVIDERS[serving(tls, &w.join(root), s, None)].id;
         let s = settings(serde_json::json!({}));
+        // `w` opened and trusted: its projects' own tsc may run.
+        let trusted = |s: &Settings| Settings { trusted: [w.to_owned()].into(), ..s.clone() };
+        let go_in = |root: &str, s: &Settings| go_executable(&w.join(root), &trusted(s).launch_in(&PROVIDERS[go], Some(w), &w.join(root)));
         assert_eq!(serving("ts5", &s), "typescript-language-server", "the project's TypeScript has tsserver");
         assert_eq!(serving("ts7/src", &s), "typescript-go", "a TypeScript 7 project (from a folder inside it)");
         assert_eq!(serving("plain", &s), "typescript-go", "no project TypeScript, and the installed one is TypeScript 7");
@@ -1487,8 +1581,12 @@ mod tests {
         assert_eq!(serving("plain", &configured), "typescript-language-server", "a tsserver named in its settings");
         let gone = settings(serde_json::json!({ "typescript-language-server": { "settings": { "tsserver": { "path": "/nonexistent/tsserver.js" } } } }));
         assert_eq!(serving("plain", &gone), "typescript-go", "a named tsserver that is not there is ignored, as it does");
-        assert_eq!(go_executable(&w.join("ts7"), &s.launch(&PROVIDERS[go])), Some(w.join("ts7/node_modules/.bin/tsc")), "the project's own tsc first");
-        assert_eq!(go_executable(&w.join("plain"), &s.launch(&PROVIDERS[go])), Some(w.join("g/bin/tsc")));
+        assert_eq!(go_in("ts7", &s), Ok(w.join("ts7/node_modules/.bin/tsc")), "a trusted project's own tsc first");
+        assert_eq!(go_executable(&w.join("ts7"), &s.launch(&PROVIDERS[go])), Ok(w.join("g/bin/tsc")), "an untrusted project's tsc never runs");
+        let elsewhere = trusted(&s).launch_in(&PROVIDERS[go], Some(&w.join("plain")), &w.join("ts7"));
+        assert_eq!(go_executable(&w.join("ts7"), &elsewhere), Ok(w.join("g/bin/tsc")), "a workspace outside the trusted folder is not trusted");
+        assert_eq!(go_executable(&w.join("plain"), &s.launch(&PROVIDERS[go])), Ok(w.join("g/bin/tsc")));
+        assert_eq!(go_in("plain", &s), Ok(w.join("g/bin/tsc")));
         // typescript-language-server with a TypeScript of its own that has tsserver: it serves projects without one.
         write("g/lib/node_modules/typescript/lib/tsserver.js", "");
         assert_eq!(serving("plain", &s), "typescript-language-server");
@@ -1496,9 +1594,18 @@ mod tests {
         std::fs::remove_file(w.join("g/lib/node_modules/typescript/lib/tsserver.js")).unwrap();
         // No TypeScript 7 to run: typescript-language-server, which says what is missing.
         package("g/lib/node_modules/typescript", "5.8.3");
-        assert_eq!(go_executable(&w.join("plain"), &s.launch(&PROVIDERS[go])), None, "`tsc` 5 has no --lsp");
+        assert!(go_executable(&w.join("plain"), &s.launch(&PROVIDERS[go])).is_err(), "`tsc` 5 has no --lsp");
         assert_eq!(serving("plain", &s), "typescript-language-server");
-        assert_eq!(serving("ts7", &s), "typescript-go", "the project's own tsc 7 still runs");
+        assert_eq!(go_in("ts7", &s), Ok(w.join("ts7/node_modules/.bin/tsc")), "the trusted project's own tsc 7 still runs");
+        // Untrusted, it still decides the server, which then says it does not run it and how to trust the folder.
+        assert_eq!(serving("ts7", &s), "typescript-go");
+        let why = go_executable(&w.join("ts7"), &s.launch(&PROVIDERS[go])).unwrap_err();
+        assert!(why.contains("ts7/node_modules/.bin/tsc") && why.contains("Trust Project Tools in This Folder"), "{why}");
+        let notice = go_tools(&w.join("ts7"), &Value::Null, None, None).unwrap();
+        assert!(notice.contains("is not run, because this folder is not trusted"), "{notice}");
+        assert_eq!(go_tools(&w.join("ts7"), &Value::Null, None, Some(w)), Ok(String::new()));
+        // A tsc above the trusted folder (or above the workspace with none) is never searched for.
+        assert!(go_executable(&w.join("ts7/sub"), &trusted(&s).launch_in(&PROVIDERS[go], Some(&w.join("ts7/sub")), &w.join("ts7/sub"))).is_err());
         package("g/lib/node_modules/typescript", "7.0.2");
         let nowhere = settings(serde_json::json!({ "typescript-go": { "executable": "/nonexistent/tsc" } }));
         assert_eq!(serving("ts7", &nowhere), "typescript-language-server", "the named executable is not there");
@@ -1506,7 +1613,31 @@ mod tests {
         let missing = settings(serde_json::json!({ "typescript-language-server": { "executable": "/nonexistent/tls" } }));
         assert_eq!(serving("plain", &missing), "typescript-go");
         // Other languages have one provider.
-        assert_eq!(super::serving(0, w, &Settings::default()), 0, "rust-analyzer");
+        assert_eq!(super::serving(0, w, &Settings::default(), None), 0, "rust-analyzer");
+    }
+
+    #[test]
+    fn saved_settings_stay_private_and_keep_trusted_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("lenz-code/providers.json");
+        let mode = || std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        let mut s = Settings::default();
+        s.trusted.insert(d.path().join("proj"));
+        s.providers.entry("other".into()).or_default().env.insert("SECRET".into(), "dummy".into());
+        assert!(s.save(&file));
+        assert_eq!(mode(), 0o600, "a new file is private");
+        assert_eq!(Settings::read(&file), s, "trusted folders and env are kept");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(Settings::default().save(&file));
+        assert_eq!(mode(), 0o640, "an existing file keeps its permissions");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(s.save(&file));
+        assert_eq!(mode(), 0o600);
+        assert_eq!(std::fs::read_dir(file.parent().unwrap()).unwrap().count(), 1, "no temporary file is left");
+        assert_eq!(s.trusted_root(Some(&d.path().join("proj"))), Some(&*d.path().join("proj")));
+        assert_eq!(s.trusted_root(Some(d.path())), None, "a folder holding a trusted one is not trusted");
+        assert_eq!(s.trusted_root(None), None, "no folder open");
     }
 
     #[test]
@@ -1522,7 +1653,31 @@ mod tests {
         assert_eq!(java_root(&w.join("gr/lib/src/C.java"), None).as_deref(), Some(&*w.join("gr")), "a Gradle settings file above");
         assert_eq!(java_root(&w.join("plain/src/B.java"), Some(w)).as_deref(), Some(w), "no build: the browsing root");
         assert_eq!(java_root(&w.join("plain/src/B.java"), None).as_deref(), Some(&*w.join("plain/src")), "no build, no browsing root");
-        let l = Launch { executable: "jdtls".into(), args: vec![], env: vec![] };
+        // Without a browsing root, never above a folder every account can write to (`/tmp`): a build there may be
+        // anyone's. Its subfolders keep their own builds.
+        use std::os::unix::fs::PermissionsExt;
+        for p in ["shared/build.gradle", "shared/notes/N.java", "shared/proj/settings.gradle", "shared/proj/src/M.java"] {
+            std::fs::create_dir_all(w.join(p).parent().unwrap()).unwrap();
+            std::fs::write(w.join(p), "").unwrap();
+        }
+        std::fs::set_permissions(w.join("shared"), std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert_eq!(java_root(&w.join("shared/notes/N.java"), None).as_deref(), Some(&*w.join("shared/notes")), "a build in a shared folder above");
+        std::fs::rename(w.join("shared/build.gradle"), w.join("shared/pom.xml")).unwrap();
+        assert_eq!(java_root(&w.join("shared/proj/src/M.java"), None).as_deref(), Some(&*w.join("shared/proj")), "a parent build in a shared folder");
+        assert_eq!(java_root(&w.join("shared/proj/src/M.java"), Some(w)).as_deref(), Some(&*w.join("shared")), "an opened folder still decides");
+        std::fs::set_permissions(w.join("shared"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(java_root(&w.join("shared/proj/src/M.java"), None).as_deref(), Some(&*w.join("shared")), "the user's own parent build");
+        // A build file that is not the user's own, or that others can write to, is not adopted either.
+        std::fs::set_permissions(w.join("shared/pom.xml"), std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(java_root(&w.join("shared/proj/src/M.java"), None).as_deref(), Some(&*w.join("shared/proj")), "a build others can write to");
+        std::fs::set_permissions(w.join("shared/pom.xml"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(owned_by(&w.join("shared/pom.xml"), owner_of(w)) && !owned_by(&w.join("shared/pom.xml"), owner_of(w).map(|u| u + 1)));
+        // The user's own link to a build file counts as theirs.
+        std::fs::create_dir(w.join("keep")).unwrap();
+        std::fs::rename(w.join("shared/pom.xml"), w.join("keep/pom.xml")).unwrap();
+        std::os::unix::fs::symlink(w.join("keep/pom.xml"), w.join("shared/pom.xml")).unwrap();
+        assert_eq!(java_root(&w.join("shared/proj/src/M.java"), None).as_deref(), Some(&*w.join("shared")), "the user's own link");
+        let l = Launch { executable: "jdtls".into(), args: vec![], env: vec![], trusted: None };
         let other = Launch { env: vec![("JAVA_HOME".into(), "/jdk".into())], ..l.clone() };
         assert_eq!(data_folder(Path::new("/x/app"), &l), data_folder(Path::new("/x/app"), &l), "stable");
         assert_ne!(data_folder(Path::new("/x/app"), &l), data_folder(Path::new("/y/app"), &l), "same name, another project");
@@ -1735,7 +1890,7 @@ mod tests {
         let ra = &PROVIDERS[0];
         assert_eq!(s.root_override(ra, Some(Path::new("/b")), Path::new("/b/x.rs")).as_deref(), Some(Path::new("/b/ws")));
         assert_eq!(s.root_override(ra, Some(Path::new("/b")), Path::new("/c/x.rs")), None);
-        assert_eq!(s.launch(ra), Launch { executable: "rust-analyzer".into(), args: vec![], env: vec![] });
+        assert_eq!(s.launch(ra), Launch { executable: "rust-analyzer".into(), args: vec![], env: vec![], trusted: None });
         assert!(!s.disabled(ra, Some(Path::new("/b"))));
         std::fs::write(&file, "not json").unwrap();
         assert_eq!(Settings::read(&file), Settings::default());
@@ -1782,7 +1937,7 @@ mod tests {
             (serde_json::json!(false), serde_json::json!(false), serde_json::json!(true)));
         // Remote schemas are asked of Lenz, which refuses them.
         assert_eq!((yaml.registrations)(&none.initialization(yaml, None)), vec![("yaml/registerContentRequest", serde_json::Value::Null)]);
-        let line = (yaml.environment.unwrap())(Path::new("/p"), &none.initialization(yaml, None), None).unwrap();
+        let line = (yaml.environment.unwrap())(Path::new("/p"), &none.initialization(yaml, None), None, None).unwrap();
         assert!(line.starts_with("Schemas: local files only") && line.contains("not downloaded") && line.contains("remoteSchemas"), "{line}");
         // The user's schemas and formatting settings, global and per project; the `format` section it asks for alone.
         let s: Settings = serde_json::from_value(serde_json::json!({ "providers": { "yaml-language-server": {
@@ -1803,14 +1958,14 @@ mod tests {
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1, "nothing written beside it");
         assert_eq!(none.configuration(yaml, Some(d.path()), Some("editor")), serde_json::json!({ "detectIndentation": false }));
         assert_eq!(none.configuration(&PROVIDERS[0], Some(d.path()), Some("[yaml]")), serde_json::Value::Null);
-        let line = (yaml.environment.unwrap())(Path::new("/p"), &s.initialization(yaml, Some(Path::new("/p"))), None).unwrap();
+        let line = (yaml.environment.unwrap())(Path::new("/p"), &s.initialization(yaml, Some(Path::new("/p"))), None, None).unwrap();
         assert!(line.contains("1 schema mapping in providers.json"), "{line}");
         // Downloads only when the user turns them on: remote schemas, or SchemaStore (whose schemas are remote).
         for allow in [serde_json::json!({ "remoteSchemas": true }), serde_json::json!({ "schemaStore": { "enable": true } })] {
             let s: Settings = serde_json::from_value(serde_json::json!({ "providers": { "yaml-language-server": { "settings": allow } } })).unwrap();
             let options = s.initialization(yaml, None);
             assert_eq!((yaml.registrations)(&options), Vec::new(), "{allow}");
-            let line = (yaml.environment.unwrap())(Path::new("/p"), &options, None).unwrap();
+            let line = (yaml.environment.unwrap())(Path::new("/p"), &options, None, None).unwrap();
             assert!(line.contains("downloads remote schemas"), "{line}");
         }
         assert!(PROVIDERS.iter().all(|p| p.id == "yaml-language-server" || (p.registrations)(&serde_json::json!({})).is_empty()), "only it is told to ask");

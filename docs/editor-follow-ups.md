@@ -672,7 +672,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 
 - **Trash choice (user decision):** Lenz implements the freedesktop.org Trash specification itself, with no new
   dependency: the home trash (`$XDG_DATA_HOME/Trash`) when the entry is on the same device, else the mount's
-  `.Trash/$uid` (only a real sticky folder) or `.Trash-$uid`. Other platforms, macOS included, refuse recoverable
+  `.Trash/$uid` (only in a real sticky folder that root or the user owns) or `.Trash-$uid`; each trash folder and its
+  `files`/`info` must be the user's with no group or other write. Other platforms, macOS included, refuse recoverable
   deletion and offer Delete Permanently; Finder's trash is not used.
 - **Deletion date in UTC:** `.trashinfo` `DeletionDate` is written in UTC, not local time as the specification asks,
   because the core has no time-zone database. Restoring does not read it; desktop trash views show the time offset by

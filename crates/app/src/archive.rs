@@ -71,36 +71,66 @@ impl Kind {
     }
 }
 
-/// What identifies a member's content: its size and CRC-32, as zip records them. Zip members are listed from the
-/// central directory without decompressing them.
+/// What identifies a member's content: its size and the SHA-256 of the bytes read from it. Never a stored claim (zip's
+/// central directory) or a CRC-32, which an archive's author can match with different bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Fingerprint {
     pub size: u64,
-    crc: u32,
+    digest: [u8; 32],
 }
 
-#[cfg(test)]
 impl Fingerprint {
+    fn read(content: &mut dyn Read) -> io::Result<Self> {
+        use sha2::Digest;
+        let (mut hasher, mut size, mut buffer) = (sha2::Sha256::new(), 0, [0; 64 << 10]);
+        loop {
+            let n = content.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            size += n as u64;
+        }
+        Ok(Fingerprint { size, digest: hasher.finalize().into() })
+    }
+
+    #[cfg(test)]
     fn of(bytes: &[u8]) -> Self {
-        Fingerprint { size: bytes.len() as u64, crc: crc32fast::hash(bytes) }
+        Fingerprint::read(&mut &bytes[..]).unwrap()
     }
 }
 
-/// Every member file by normalized path. Directories are left out, and a later duplicate replaces an earlier one,
-/// as extracting would. Members whose path climbs out of the archive (`..`) are left out too.
+/// Every member file by normalized path, as extracting would write it; directories are left out. An archive whose
+/// headers could make an extractor write something else is an error, never a shorter or different listing: headers
+/// that name a member two ways, a path listed twice, a member with no path inside the archive, or an entry of a kind
+/// Lenz does not read.
 pub(crate) fn members(kind: Kind, bytes: &[u8]) -> Result<BTreeMap<String, Fingerprint>, String> {
     let mut out = BTreeMap::new();
     match kind {
         Kind::Zip => {
-            let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| kind.error()(e.to_string()))?;
+            let error = kind.error();
+            let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| error(e.to_string()))?;
+            // extractors read local headers, and differ on a repeated name: both must agree with the central directory
+            zip.validate_header_consistency().map_err(|e| error(e.to_string()))?;
+            let mut left = MAX_UNPACKED;
             for index in 0..zip.len() {
-                // raw: the central directory's record, so neither decompression nor a password is needed
-                let file = zip.by_index_raw(index).map_err(|e| kind.error()(e.to_string()))?;
+                // decompressed, so the fingerprint is of the bytes extracting writes; the reader checks the CRC-32
+                let mut file = zip.by_index(index).map_err(|e| error(e.to_string()))?;
+                let raw = file.name().map_err(|e| error(e.to_string()))?.into_owned();
                 if file.is_dir() {
+                    // UnZip writes a name ending in `\` as a file, and a directory holding data is not one
+                    if file.size() != 0 || file.name_raw().ends_with(b"\\") {
+                        return Err(error(format!("member {raw:?} is a directory name holding a file")));
+                    }
                     continue;
                 }
-                let Some(name) = normalize(&file.name().map_err(|e| kind.error()(e.to_string()))?) else { continue };
-                out.insert(name, Fingerprint { size: file.size(), crc: file.crc32() });
+                let name = normalize(&raw).ok_or_else(|| error(format!("member {raw:?} has no path inside the archive")))?;
+                let mut limited = Limit { inner: &mut file, left };
+                let fingerprint = Fingerprint::read(&mut limited).map_err(|e| error(format!("{raw}: {e}")))?;
+                left = limited.left;
+                if out.insert(name, fingerprint).is_some() {
+                    return Err(error(format!("member {raw:?} appears more than once")));
+                }
                 if out.len() > MAX_MEMBERS {
                     return Err(format!("more than {MAX_MEMBERS} files"));
                 }
@@ -108,18 +138,7 @@ pub(crate) fn members(kind: Kind, bytes: &[u8]) -> Result<BTreeMap<String, Finge
         }
         Kind::Tar(compression) => {
             each_tar(compression, bytes, |name, content| {
-                let mut hasher = crc32fast::Hasher::new();
-                let mut size = 0;
-                let mut buffer = [0; 64 << 10];
-                loop {
-                    let n = content.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..n]);
-                    size += n as u64;
-                }
-                out.insert(name, Fingerprint { size, crc: hasher.finalize() });
+                out.insert(name, Fingerprint::read(content)?);
                 if out.len() > MAX_MEMBERS {
                     return Err(io::Error::other(format!("more than {MAX_MEMBERS} files")));
                 }
@@ -137,15 +156,8 @@ pub(crate) fn extract(kind: Kind, bytes: &[u8], name: &str) -> Result<Vec<u8>, S
     let too_large = || format!("lenz: {name} is larger than {} MiB", MAX_MEMBER >> 20);
     match kind {
         Kind::Zip => {
-            let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| kind.error()(e.to_string()))?;
-            let mut found = None;
-            for index in 0..zip.len() {
-                let file = zip.by_index_raw(index).map_err(|e| kind.error()(e.to_string()))?;
-                if !file.is_dir() && file.name().ok().and_then(|n| normalize(&n)).as_deref() == Some(name) {
-                    found = Some(index);
-                }
-            }
-            let file = zip.by_index(found.ok_or_else(missing)?).map_err(|e| format!("lenz: {name}: {e}"))?;
+            let (mut zip, index) = zip_member(bytes, name)?;
+            let file = zip.by_index(index).map_err(|e| format!("lenz: {name}: {e}"))?;
             if file.size() > MAX_MEMBER {
                 return Err(too_large());
             }
@@ -176,10 +188,30 @@ pub(crate) fn extract(kind: Kind, bytes: &[u8], name: &str) -> Result<Vec<u8>, S
     }
 }
 
+type Zip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
+
+/// Zip member `name` (as [`members`] names it), found from the central directory alone.
+fn zip_member<'a>(bytes: &'a [u8], name: &str) -> Result<(Zip<'a>, usize), String> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| Kind::Zip.error()(e.to_string()))?;
+    let mut found = None;
+    for index in 0..zip.len() {
+        let file = zip.by_index_raw(index).map_err(|e| Kind::Zip.error()(e.to_string()))?;
+        if !file.is_dir() && file.name().ok().and_then(|n| normalize(&n)).as_deref() == Some(name) {
+            found = Some(index);
+        }
+    }
+    let index = found.ok_or_else(|| format!("lenz: {name} is not in the {}", Kind::Zip.label()))?;
+    Ok((zip, index))
+}
+
 /// Member `name`'s size, read from the archive's headers.
 pub(crate) fn size(kind: Kind, bytes: &[u8], name: &str) -> Result<u64, String> {
     match kind {
-        Kind::Zip => members(kind, bytes)?.get(name).map(|f| f.size).ok_or_else(|| format!("lenz: {name} is not in the {}", kind.label())),
+        // the central directory's record: decompressing every member to find one size would cost a whole listing
+        Kind::Zip => {
+            let (mut zip, index) = zip_member(bytes, name)?;
+            zip.by_index_raw(index).map(|file| file.size()).map_err(|e| kind.error()(e.to_string()))
+        }
         // a tar stream has no index: reading the member costs about as much as finding its header
         Kind::Tar(_) => extract(kind, bytes, name).map(|b| b.len() as u64),
     }
@@ -200,32 +232,137 @@ fn stream(compression: Compression, bytes: &[u8]) -> Result<Box<dyn Read + '_>, 
         Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(bytes)),
         Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(bytes)),
         Compression::Xz => Box::new(lzma_rust2::XzReader::new(bytes, true)),
-        Compression::Zstd => Box::new(ruzstd::decoding::StreamingDecoder::new(bytes).map_err(|e| e.to_string())?),
+        Compression::Zstd => Box::new(ZstdFrames { rest: bytes, frame: None }),
     })
 }
 
-/// Calls `visit` with each member file's normalized path and content, in archive order.
+/// Every zstd frame in turn, skipping skippable frames, as `zstd -d` reads a file; ruzstd's decoder reads one frame.
+struct ZstdFrames<'a> {
+    rest: &'a [u8],
+    frame: Option<ruzstd::decoding::StreamingDecoder<&'a [u8], ruzstd::decoding::FrameDecoder>>,
+}
+
+impl Read for ZstdFrames<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if let Some(frame) = &mut self.frame {
+                let n = frame.read(buffer)?;
+                if n > 0 {
+                    return Ok(n);
+                }
+                self.rest = self.frame.take().map_or(self.rest, |frame| frame.into_inner());
+            }
+            if self.rest.is_empty() {
+                return Ok(0);
+            }
+            // magic 0x184D2A5?, then a 32-bit length: metadata with no content
+            if let Some((magic, length)) = self.rest.first_chunk::<8>().map(|h| h.split_at(4))
+                && let (Ok(magic), Ok(length)) = (<[u8; 4]>::try_from(magic), <[u8; 4]>::try_from(length))
+                && u32::from_le_bytes(magic) & 0xffff_fff0 == 0x184d_2a50
+            {
+                let size = u32::from_le_bytes(length) as usize;
+                self.rest = self.rest[8..].get(size..).ok_or_else(|| io::Error::other("truncated zstd skippable frame"))?;
+                continue;
+            }
+            // the frame header is read here, so every turn of the loop consumes input
+            self.frame = Some(ruzstd::decoding::StreamingDecoder::new(self.rest).map_err(io::Error::other)?);
+        }
+    }
+}
+
+/// Calls `visit` with each member file's normalized path and content, in archive order. Fails where GNU tar or bsdtar
+/// could write something the listing does not show (see [`members`]).
 fn each_tar(
     compression: Compression,
     bytes: &[u8],
     mut visit: impl FnMut(String, &mut dyn Read) -> io::Result<()>,
 ) -> Result<(), String> {
+    use tar::EntryType;
     let mut archive = tar::Archive::new(Limit { inner: stream(compression, bytes)?, left: MAX_UNPACKED });
+    let mut seen = std::collections::HashSet::new();
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.header().entry_type();
+        one_name(&mut entry, kind)?;
+        if kind.is_pax_global_extensions() {
+            continue;
+        }
         let path = entry.path_bytes();
         let path = std::str::from_utf8(&path).map_err(|_| "non-UTF-8 archive member paths are unsupported".to_string())?;
-        let Some(name) = normalize(path) else { continue };
-        let kind = entry.header().entry_type();
-        if kind.is_file() || kind == tar::EntryType::Continuous {
+        let Some(name) = normalize(path) else {
+            // a root `./` directory names nothing; any other entry is written somewhere
+            if kind.is_dir() {
+                continue;
+            }
+            return Err(format!("member {path:?} has no path inside the archive"));
+        };
+        if kind.is_dir() {
+            continue;
+        }
+        // extracting keeps the last copy, but a hard link made before it keeps an earlier one
+        if !seen.insert(name.clone()) {
+            return Err(format!("member {name:?} appears more than once"));
+        }
+        if seen.len() > MAX_MEMBERS {
+            return Err(format!("more than {MAX_MEMBERS} files"));
+        }
+        // the tar crate expands a GNU sparse map into the entry's reader
+        if kind.is_file() || kind == EntryType::Continuous || kind.is_gnu_sparse() {
             visit(name, &mut entry)
         } else if kind.is_symlink() || kind.is_hard_link() {
             let target = entry.link_name_bytes().map(|t| t.into_owned()).unwrap_or_default();
             visit(name, &mut target.as_slice())
-        } else {
+        } else if kind.is_character_special() || kind.is_block_special() || kind.is_fifo() {
             continue;
+        } else {
+            // GNU tar writes an unknown type as a regular file
+            return Err(format!("member {name:?} has tar entry type {:?}, which Lenz does not read", kind.as_byte() as char));
         }
         .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Fails unless the tar crate names `entry` as GNU tar and bsdtar would. They take a PAX path over a GNU long name and
+/// the last of repeated records, GNU tar applies a global header's path, and the tar crate passes through, as entries,
+/// extension headers that lack ustar magic.
+fn one_name(entry: &mut tar::Entry<impl Read>, kind: tar::EntryType) -> Result<(), String> {
+    let conflict = |what: &str| Err(format!("the archive's headers disagree about a member: {what}"));
+    if kind.is_gnu_longname() || kind.is_gnu_longlink() || kind.is_pax_local_extensions() {
+        return conflict("an extension header has no ustar magic");
+    }
+    // extension headers before a global one would be spent on it here, but on the next member by GNU tar
+    if kind.is_pax_global_extensions() && entry.raw_header_position() != 0 {
+        return conflict("a PAX global header is not the first");
+    }
+    let (path, link) = (entry.path_bytes().into_owned(), entry.link_name_bytes().map(|l| l.into_owned()));
+    let Some(fields) = entry.pax_extensions().map_err(|e| e.to_string())? else { return Ok(()) };
+    let (mut paths, mut links, mut sizes) = (Vec::new(), Vec::new(), 0);
+    for field in fields {
+        let field = field.map_err(|e| e.to_string())?;
+        let key = field.key_bytes();
+        // sparse PAX members hold a map the tar crate does not expand, and may carry their real name in `GNU.sparse.name`
+        if key.starts_with(b"GNU.sparse") || key == b"SCHILY.realsize" {
+            return conflict("a PAX sparse member");
+        }
+        if kind.is_pax_global_extensions() && matches!(key, b"path" | b"linkpath" | b"size") {
+            return conflict("a PAX global header sets a member's path, link or size");
+        }
+        match key {
+            b"path" => paths.push(field.value_bytes().to_vec()),
+            b"linkpath" => links.push(field.value_bytes().to_vec()),
+            b"size" => sizes += 1,
+            _ => {}
+        }
+    }
+    if paths.len() > 1 || links.len() > 1 || sizes > 1 {
+        return conflict("a PAX header repeats a path, link or size");
+    }
+    if paths.first().is_some_and(|p| *p != path) || links.first().is_some_and(|l| Some(l) != link.as_ref()) {
+        return conflict("a GNU long name differs from the PAX one");
     }
     Ok(())
 }
@@ -331,7 +468,7 @@ mod tests {
 
     #[test]
     fn zip_members_are_listed_without_directories_and_extracted() {
-        let zip = testing::zip(&[("dir/", b""), ("dir/a.txt", b"alpha\n"), ("./b.txt", b"beta\n"), ("../evil", b"x")]);
+        let zip = testing::zip(&[("dir/", b""), ("dir/a.txt", b"alpha\n"), ("./b.txt", b"beta\n")]);
         let list = members(Kind::Zip, &zip).unwrap();
         assert_eq!(list.keys().collect::<Vec<_>>(), ["b.txt", "dir/a.txt"]);
         assert_eq!(list["dir/a.txt"], Fingerprint::of(b"alpha\n"));
@@ -344,11 +481,10 @@ mod tests {
     #[test]
     fn tar_members_are_listed_and_extracted_in_every_compression() {
         for compression in [Compression::None, Compression::Gzip, Compression::Bzip2, Compression::Xz] {
-            let tar = testing::tar(&[("a.txt", b"one\n"), ("sub/b.bin", b"\0\x01"), ("a.txt", b"two\n")], compression);
+            let tar = testing::tar(&[("a.txt", b"two\n"), ("sub/b.bin", b"\0\x01")], compression);
             let kind = Kind::Tar(compression);
             let list = members(kind, &tar).unwrap();
             assert_eq!(list.keys().collect::<Vec<_>>(), ["a.txt", "sub/b.bin"], "{compression:?}");
-            // a later duplicate wins, as extracting the archive would leave it
             assert_eq!(list["a.txt"], Fingerprint::of(b"two\n"));
             assert_eq!(extract(kind, &tar, "a.txt").unwrap(), b"two\n");
             assert_eq!(size(kind, &tar, "sub/b.bin").unwrap(), 2);
@@ -423,6 +559,328 @@ mod tests {
         assert_eq!(set.comparisons.len(), 1);
         assert!(!set.comparisons[0].in_archive());
         assert!(set.note(0).unwrap().contains("non-UTF-8"));
+    }
+
+    /// A Change Set of `old` and `new`, written as `old.<ext>` and `new.<ext>` in the returned directory.
+    fn load(ext: &str, old: &[u8], new: &[u8]) -> (tempfile::TempDir, crate::changeset::ChangeSet) {
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join(format!("old.{ext}")), d.path().join(format!("new.{ext}")));
+        std::fs::write(&left, old).unwrap();
+        std::fs::write(&right, new).unwrap();
+        let set = crate::changeset::ChangeSet::load(&crate::changeset::Spec::Plain { left, right }, d.path()).unwrap();
+        (d, set)
+    }
+
+    /// The Change Set kept the archive whole and says why: never "only its packing differs", never a partial list.
+    fn refused(ext: &str, old: &[u8], new: &[u8]) -> String {
+        let (_d, set) = load(ext, old, new);
+        assert_eq!(set.comparisons.len(), 1);
+        assert!(!set.comparisons[0].in_archive());
+        let note = set.note(0).unwrap();
+        assert!(note.starts_with("not shown as a folder"), "{note}");
+        note.to_string()
+    }
+
+    /// `(file name, status)` of each Comparison.
+    fn listed(set: &crate::changeset::ChangeSet) -> Vec<(String, crate::changeset::Status)> {
+        set.comparisons.iter().map(|c| (c.path.rsplit('/').next().unwrap().to_string(), c.status.clone())).collect()
+    }
+
+    /// A tar of `entries` exactly as given, sizes and checksums set, then the end blocks.
+    fn raw_tar(entries: Vec<(tar::Header, Vec<u8>)>) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (mut header, data) in entries {
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            builder.append(&header, data.as_slice()).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    /// A header of type `kind` named `name` in its 100-byte name field; `new` picks the magic (ustar, GNU or none).
+    fn header(new: fn() -> tar::Header, name: &str, kind: u8) -> tar::Header {
+        let mut header = new();
+        header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+        header.set_entry_type(tar::EntryType::new(kind));
+        header.set_mode(0o644);
+        header
+    }
+
+    /// PAX extended header records.
+    fn pax(records: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (key, value) in records {
+            let body = format!(" {key}={value}\n");
+            // the length counts its own digits
+            let mut len = body.len() + 1;
+            while len.to_string().len() + body.len() != len {
+                len = len.to_string().len() + body.len();
+            }
+            out.extend(format!("{len}{body}").bytes());
+        }
+        out
+    }
+
+    fn good() -> Vec<u8> {
+        raw_tar(vec![(header(tar::Header::new_ustar, "install.sh", b'0'), b"echo good\n".to_vec())])
+    }
+
+    #[test]
+    fn tar_headers_that_name_a_member_two_ways_are_refused() {
+        let ustar = tar::Header::new_ustar;
+        let payload = || b"echo EVIL\n".to_vec();
+        let member = || (header(ustar, "notes.txt", b'0'), payload());
+        let cases = [
+            // GNU tar and bsdtar take the PAX path; the tar crate the GNU long name
+            ("long name vs PAX path", vec![(header(tar::Header::new_gnu, "././@LongLink", b'L'), b"notes.txt\0".to_vec()),
+                (header(ustar, "PaxHeaders/x", b'x'), pax(&[("path", "install.sh")])), member()]),
+            ("long name '.' vs PAX path", vec![(header(tar::Header::new_gnu, "././@LongLink", b'L'), b".\0".to_vec()),
+                (header(ustar, "PaxHeaders/x", b'x'), pax(&[("path", "install.sh")])), member()]),
+            // extractors take the last record; the tar crate the first
+            ("repeated PAX path", vec![(header(ustar, "PaxHeaders/x", b'x'), pax(&[("path", "notes.txt"), ("path", "install.sh")])), member()]),
+            ("repeated PAX size", vec![(header(ustar, "PaxHeaders/x", b'x'), pax(&[("size", "10"), ("size", "10")])), member()]),
+            // GNU tar applies a global path; the tar crate ignores it
+            ("PAX global path", vec![(header(ustar, "pax_global_header", b'g'), pax(&[("path", "install.sh")])), member()]),
+            ("PAX global header after a member", vec![member(), (header(ustar, "pax_global_header", b'g'), pax(&[("comment", "x")]))]),
+            // without magic the tar crate returns the header as an entry; extractors apply it
+            ("long name without magic", vec![(header(tar::Header::new_old, "././@LongLink", b'L'), b"install.sh\0".to_vec()), member()]),
+            ("PAX header without magic", vec![(header(tar::Header::new_old, "PaxHeaders/x", b'x'), pax(&[("path", "install.sh")])), member()]),
+            // the real name and content of a sparse PAX member are in its records and map
+            ("PAX sparse member", vec![(header(ustar, "PaxHeaders/x", b'x'), pax(&[("GNU.sparse.name", "install.sh")])), member()]),
+        ];
+        for (case, entries) in cases {
+            let tar = raw_tar(entries);
+            let error = members(Kind::Tar(Compression::None), &tar).unwrap_err();
+            assert!(error.contains("headers disagree"), "{case}: {error}");
+            refused("tar", &good(), &tar);
+        }
+    }
+
+    #[test]
+    fn zip_local_and_central_names_must_agree() {
+        // bsdtar extracts by the local header's name, which the central directory listing never sees
+        let old = testing::zip(&[("install.sh", b"echo good\n")]);
+        let mut new = testing::zip(&[("notes0.txt", b"echo EVIL\n")]);
+        let local = new.windows(10).position(|w| w == b"notes0.txt").unwrap();
+        new[local..local + 10].copy_from_slice(b"install.sh");
+        assert!(refused("zip", &old, &new).contains("header inconsistency"));
+    }
+
+    #[test]
+    fn tar_long_names_global_headers_and_sparse_members_still_list() {
+        let long = format!("{}/install.sh", "deep".repeat(30));
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut gnu = tar::Header::new_gnu();
+        gnu.set_size(5);
+        gnu.set_mode(0o644);
+        // a GNU header's name field holds 100 bytes: the builder writes an `L` long name
+        builder.append_data(&mut gnu, &long, b"long\n".as_slice()).unwrap();
+        let gnu_long = builder.into_inner().unwrap();
+        let pax_long = raw_tar(vec![
+            (header(tar::Header::new_ustar, "pax_global_header", b'g'), pax(&[("comment", "0123abcd")])),
+            (header(tar::Header::new_ustar, "PaxHeaders/x", b'x'), pax(&[("path", &long), ("mtime", "1.5")])),
+            (header(tar::Header::new_ustar, "truncated", b'0'), b"long\n".to_vec()),
+        ]);
+        let both = raw_tar(vec![
+            (header(tar::Header::new_gnu, "././@LongLink", b'L'), format!("{long}\0").into_bytes()),
+            (header(tar::Header::new_ustar, "PaxHeaders/x", b'x'), pax(&[("path", &long)])),
+            (header(tar::Header::new_ustar, "truncated", b'0'), b"long\n".to_vec()),
+            (header(tar::Header::new_ustar, "dir/", b'5'), Vec::new()),
+            (header(tar::Header::new_ustar, "pipe", b'6'), Vec::new()),
+        ]);
+        for tar in [gnu_long, pax_long, both] {
+            let list = members(Kind::Tar(Compression::None), &tar).unwrap();
+            assert_eq!(list.keys().collect::<Vec<_>>(), [&long]);
+            assert_eq!(list[&long], Fingerprint::of(b"long\n"));
+        }
+        // GNU sparse: the tar crate expands the map, so the member is listed by what extracting writes
+        let mut sparse = header(tar::Header::new_gnu, "hook.sh", b'S');
+        let gnu = sparse.as_gnu_mut().unwrap();
+        gnu.sparse[0].set_offset(4);
+        gnu.sparse[0].set_length(6);
+        gnu.set_real_size(10);
+        let tar = raw_tar(vec![(sparse, b"PWNED\n".to_vec())]);
+        let kind = Kind::Tar(Compression::None);
+        assert_eq!(members(kind, &tar).unwrap()["hook.sh"], Fingerprint::of(b"\0\0\0\0PWNED\n"));
+        assert_eq!(extract(kind, &tar, "hook.sh").unwrap(), b"\0\0\0\0PWNED\n");
+    }
+
+    #[test]
+    fn duplicate_members_are_refused() {
+        // a hard link made before the copy that replaces its target keeps the earlier bytes
+        let ustar = tar::Header::new_ustar;
+        let mut link = header(ustar, "run.sh", b'1');
+        link.set_link_name("install.sh").unwrap();
+        let tar = raw_tar(vec![
+            (header(ustar, "install.sh", b'0'), b"echo EVIL\n".to_vec()),
+            (link, Vec::new()),
+            (header(ustar, "install.sh", b'0'), b"echo good\n".to_vec()),
+        ]);
+        assert!(refused("tar", &good(), &tar).contains("appears more than once"));
+        let plain = testing::tar(&[("a.txt", b"one\n"), ("a.txt", b"two\n")], Compression::Gzip);
+        assert!(members(Kind::Tar(Compression::Gzip), &plain).unwrap_err().contains("appears more than once"));
+
+        // zip indexes a repeated stored name at its first position with its last record's data
+        let old = testing::zip(&[("install.sh", b"echo good\n")]);
+        let mut zip = testing::zip(&[("install.sh", b"echo good\n"), ("./install.sh", b"echo good\n"), ("xnstall.sh", b"echo EVIL\n")]);
+        let mut at = 0;
+        while let Some(found) = zip[at..].windows(10).position(|w| w == b"xnstall.sh") {
+            zip[at + found] = b'i';
+            at += found + 1;
+        }
+        assert!(refused("zip", &old, &zip).contains("duplicate"));
+        // different stored names, one extracted path
+        let zip = testing::zip(&[("install.sh", b"echo good\n"), ("./install.sh", b"echo EVIL\n")]);
+        assert!(refused("zip", &old, &zip).contains("appears more than once"));
+    }
+
+    #[test]
+    fn members_extractors_write_are_never_skipped() {
+        let ustar = tar::Header::new_ustar;
+        let base = || (header(ustar, "README", b'0'), b"v1\n".to_vec());
+        let old = raw_tar(vec![base()]);
+        // GNU tar writes an unknown type as a regular file; bsdtar too
+        for kind in *b"Z8" {
+            let new = raw_tar(vec![base(), (header(ustar, "hook.sh", kind), b"echo PWNED\n".to_vec())]);
+            assert!(refused("tar", &old, &new).contains("entry type"));
+        }
+        let new = raw_tar(vec![base(), (header(ustar, "../hook.sh", b'0'), b"echo PWNED\n".to_vec())]);
+        assert!(refused("tar", &old, &new).contains("no path inside the archive"));
+
+        let old = testing::zip(&[("install.sh", b"echo good\n")]);
+        for (name, reason) in [("../hook.sh", "no path inside the archive"), ("hook.sh\\", "directory name holding a file"),
+            ("hook/", "directory name holding a file")] {
+            let new = testing::zip(&[("install.sh", b"echo good\n"), (name, b"echo PWNED\n")]);
+            assert!(refused("zip", &old, &new).contains(reason), "{name}");
+        }
+    }
+
+    #[test]
+    fn members_are_compared_by_content_not_size_and_crc() {
+        // equal size and CRC-32, different bytes
+        let a = [33, 90, 232, 108, 111, 206, 0, 228];
+        let b = [252, 81, 220, 85, 53, 59, 68, 216];
+        assert_eq!(crc32fast::hash(&a), crc32fast::hash(&b));
+        let zip = |files: &[(&str, &[u8])]| testing::zip(files);
+        let tar = |files: &[(&str, &[u8])]| testing::tar(files, Compression::Gzip);
+        for (ext, make) in [("zip", &zip as &dyn Fn(&[(&str, &[u8])]) -> Vec<u8>), ("tar.gz", &tar)] {
+            let (_d, set) = load(ext, &make(&[("README", b"v1\n"), ("lib.bin", &a)]), &make(&[("README", b"v2\n"), ("lib.bin", &b)]));
+            let modified = crate::changeset::Status::Modified;
+            assert_eq!(listed(&set), [("README".into(), modified.clone()), ("lib.bin".into(), modified)]);
+            // not paired as a rename with identical content
+            let (_d, set) = load(ext, &make(&[("old.bin", &a)]), &make(&[("new.bin", &b)]));
+            assert!(set.comparisons.iter().all(|c| !matches!(c.status, crate::changeset::Status::Renamed { .. })), "{ext}");
+            assert_eq!(set.comparisons.len(), 2, "{ext}");
+        }
+        // a zip whose stored CRC-32 claims the old bytes: the reader checks it
+        let stored = |content: &[u8]| {
+            let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            out.start_file("main.py", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            std::io::Write::write_all(&mut out, content).unwrap();
+            out.finish().unwrap().into_inner()
+        };
+        let old = stored(b"verify_signature = 1\n");
+        let mut forged = old.clone();
+        let at = forged.windows(18).position(|w| w == b"verify_signature =").unwrap();
+        forged[at + 19] = b'0';
+        assert!(refused("zip", &old, &forged).contains("checksum"));
+        // an encrypted member can't be read without its password, so it can't be compared
+        let mut encrypted = stored(b"verify_signature = 0\n");
+        let central = encrypted.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        encrypted[6] |= 1;
+        encrypted[central + 8] |= 1;
+        assert!(refused("zip", &old, &encrypted).contains("assword"));
+    }
+
+    #[test]
+    fn every_zstd_frame_is_read() {
+        let first = testing::tar(&[("README", b"v2\n")], Compression::None);
+        // without its end blocks, the first frame ends after a whole member
+        let first = &first[..first.len() - 1024];
+        let second = testing::tar(&[("evil.sh", b"echo EVIL\n")], Compression::None);
+        let skippable = [0x50, 0x2A, 0x4D, 0x18, 3, 0, 0, 0, 1, 2, 3];
+        let new = [zstd_stored_frame(first), skippable.to_vec(), zstd_stored_frame(&second)].concat();
+        let kind = Kind::Tar(Compression::Zstd);
+        assert_eq!(members(kind, &new).unwrap().keys().collect::<Vec<_>>(), ["README", "evil.sh"]);
+        assert_eq!(extract(kind, &new, "evil.sh").unwrap(), b"echo EVIL\n");
+        assert_eq!(unpack(Compression::Zstd, &new, 1 << 20).unwrap().unwrap(), [first, &second[..]].concat());
+        let old = zstd_stored_frame(&testing::tar(&[("README", b"v1\n")], Compression::None));
+        let (_d, set) = load("tar.zst", &old, &new);
+        let status = |s: &str| (s.to_string(), if s == "README" { crate::changeset::Status::Modified } else { crate::changeset::Status::Added });
+        assert_eq!(listed(&set), [status("README"), status("evil.sh")]);
+        // a skippable frame cut short is an error, not the end of the archive
+        let cut = [zstd_stored_frame(first), skippable[..9].to_vec()].concat();
+        assert!(unpack(Compression::Zstd, &cut, 1 << 20).unwrap_err().contains("truncated zstd skippable frame"));
+    }
+
+    /// Change Set load of two changed archives that differ in one member: many small members, and a few large ones.
+    /// `cargo test --release -p lenz --no-default-features --lib archive_change_set_release_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn archive_change_set_release_probe() {
+        // compressible text, about 3:1 under deflate, as source trees are
+        let text = |seed: u64, len: usize| {
+            let words = ["fn ", "let ", "self", ".read(", "archive", " = ", "member", "();\n", "    ", "Result<", ">", "match "];
+            let (mut out, mut state) = (Vec::with_capacity(len + 16), seed.wrapping_mul(6364136223846793005) | 1);
+            while out.len() < len {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                out.extend(words[(state >> 59) as usize % words.len()].as_bytes());
+            }
+            out.truncate(len);
+            out
+        };
+        let status = |key: &str| {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            status.lines().find_map(|l| l.strip_prefix(key)?.trim().strip_suffix("kB")?.trim().parse::<f64>().ok()).map(|kb| kb / 1024.)
+        };
+        let d = tempfile::tempdir().unwrap();
+        let mut fixtures = Vec::new();
+        for (label, count, len) in [("5000x2KiB", 5000, 2 << 10), ("32x2MiB", 32, 2 << 20)] {
+            let old: Vec<(String, Vec<u8>)> = (0..count).map(|i| (format!("src/m{i:05}.rs"), text(i as u64, len))).collect();
+            let mut new = old.clone();
+            new[count / 2].1[len / 2] ^= 1;
+            let changed = new[count / 2].0.clone();
+            fn borrow(files: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
+                files.iter().map(|(n, c)| (n.as_str(), c.as_slice())).collect()
+            }
+            for ext in ["zip", "tar.gz", "tar.zst"] {
+                let make = |files: &[(&str, &[u8])]| match ext {
+                    "zip" => testing::zip(files),
+                    "tar.gz" => testing::tar(files, Compression::Gzip),
+                    // stored zstd blocks: measures framing and member hashing, not zstd decompression
+                    _ => zstd_stored_frame(&testing::tar(files, Compression::None)),
+                };
+                let (left, right) = (d.path().join(format!("{label}-old.{ext}")), d.path().join(format!("{label}-new.{ext}")));
+                std::fs::write(&left, make(&borrow(&old))).unwrap();
+                std::fs::write(&right, make(&borrow(&new))).unwrap();
+                fixtures.push((format!("{label}.{ext}"), count * len, changed.clone(), left, right));
+            }
+        }
+        let mut cases = Vec::new();
+        for (case, unpacked, changed, left, right) in fixtures {
+            let spec = crate::changeset::Spec::Plain { left: left.clone(), right: right.clone() };
+            let (mut ms, mut peak) = (Vec::new(), Vec::new());
+            for sample in 0..12 {
+                // resets VmHWM to the current RSS, so the peak below is this load's own
+                let _ = std::fs::write("/proc/self/clear_refs", "5");
+                let before = status("VmRSS:");
+                let started = std::time::Instant::now();
+                let set = crate::changeset::ChangeSet::load(&spec, d.path()).unwrap();
+                let elapsed = started.elapsed().as_secs_f64() * 1000.;
+                assert_eq!(set.comparisons.len(), 1, "{case}");
+                assert!(set.comparisons[0].in_archive() && set.comparisons[0].path.ends_with(&changed), "{case}");
+                assert_eq!(set.comparisons[0].status, crate::changeset::Status::Modified);
+                // the first sample warms the page cache and allocator
+                if sample > 0 {
+                    ms.push(elapsed);
+                    peak.extend(before.zip(status("VmHWM:")).map(|(before, peak)| peak - before));
+                }
+            }
+            let bytes = [std::fs::metadata(&left).unwrap().len(), std::fs::metadata(&right).unwrap().len()];
+            cases.push(serde_json::json!({"case": case, "archive_bytes": bytes, "unpacked_bytes": unpacked, "load_ms": ms,
+                "peak_rss_growth_mib": peak, "rss_mib": crate::perf::rss_mib()}));
+        }
+        println!("LENZ_ARCHIVE_PROBE {}", serde_json::json!({"version": 1, "loadavg": std::fs::read_to_string("/proc/loadavg").ok(), "cases": cases}));
     }
 
 }

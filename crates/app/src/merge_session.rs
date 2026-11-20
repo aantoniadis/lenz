@@ -356,8 +356,9 @@ fn assemble(
     git_output: Option<String>,
 ) -> Result<Opened, String> {
     // the Result keeps the working-tree file's encoding, BOM and line endings; Ours' when there's no file
+    let mut hides_ascii = [&b, &o, &t].iter().any(|d| d.hides_ascii);
     let (snapshot, file) = match write::Snapshot::read(merged, None) {
-        Ok((s, d)) => (s, Some(lossless(&path, d)?.text)),
+        Ok((s, d)) => { hides_ascii |= d.hides_ascii; (s, Some(lossless(&path, d)?.text)) }
         Err(_) if !merged.exists() => (write::Snapshot::missing(merged, &o), None),
         Err(e) => return Err(format!("lenz diff merge: {e}")),
     };
@@ -384,6 +385,7 @@ fn assemble(
         (!setup.has_base).then(|| "Added on both sides — no common base".to_string()),
         form_notice("Ours", &o, &snapshot),
         form_notice("Theirs", &t, &snapshot),
+        hides_ascii.then(|| crate::encoding::HIDES_ASCII_NOTICE.to_string()),
     ];
     let lang = highlight::detect(merged, ol.first().copied().unwrap_or(""));
     // markers as git writes them: read off git's own markers still in the file, else `HEAD` for ours in a repository
@@ -1481,6 +1483,22 @@ pub(crate) mod tests {
         let mut m = opened.result;
         m.accept(0, Pick::Theirs);
         assert_eq!(m.lines().join("\n"), "one\nTHEIRS\nthree\nfour\n");
+    }
+
+    #[test]
+    fn a_guessed_encoding_that_hides_ascii_is_noticed_in_the_merge_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // "# 設定を表示" in Shift_JIS, then a backtick after a lead byte
+        let sjis = b"# \x90\xDD\x92\xE8\x82\xF0\x95\x5C\x8E\xA6\necho \"mode: \x83`touch marker #\x83`\"\n";
+        let [b, o, t, m] = ["base", "ours", "theirs", "merged"].map(|n| d.join(n));
+        std::fs::write(&b, "a\n").unwrap();
+        std::fs::write(&o, "a\n").unwrap();
+        std::fs::write(&t, sjis).unwrap();
+        let opened = open_files(&b, &o, &t, &m, d).unwrap();
+        assert!(opened.notices.iter().any(|n| n == crate::encoding::HIDES_ASCII_NOTICE), "{:?}", opened.notices);
+        std::fs::write(&t, "b\n").unwrap();
+        assert!(open_files(&b, &o, &t, &m, d).unwrap().notices.is_empty());
     }
 
     #[test]

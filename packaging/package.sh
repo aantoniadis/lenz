@@ -24,6 +24,13 @@ fi
 # macOS build outside the home folder (and its user name), unless told where.
 if [[ $target == *-apple-darwin && -z ${CARGO_TARGET_DIR:-} ]]; then
     export CARGO_TARGET_DIR=/tmp/lenz-dist
+    # /tmp is shared: another account must not own, link or be able to write the folder the apps are built in.
+    mkdir -m 700 "$CARGO_TARGET_DIR" 2> /dev/null || true
+    if ! python3 -c 'import os, stat, sys; s = os.lstat(sys.argv[1])
+sys.exit(not (stat.S_ISDIR(s.st_mode) and s.st_uid == os.getuid() and not s.st_mode & 0o022))' "$CARGO_TARGET_DIR" 2> /dev/null; then
+        echo "$CARGO_TARGET_DIR must be your own folder that no one else can change (not a link); remove it or set CARGO_TARGET_DIR" >&2
+        exit 1
+    fi
 fi
 # glibc before 2.38 has no strlcpy, which the PostgreSQL parser's C library expects (see packaging/glibc-strlcpy.h);
 # only that library's make reads CPPFLAGS.

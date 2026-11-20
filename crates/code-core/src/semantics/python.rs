@@ -2,7 +2,8 @@
 //! it. Lenz reads the same settings Pyright reads, so it can say which environment answers and refuse to start
 //! Pyright when the configured one is missing: Pyright itself would then fall back to the first interpreter on its
 //! PATH without telling anyone (1.1.414 only logs it). Reads bounded project files; [`describe`] also runs an
-//! interpreter's `--version`, so call it off the UI thread.
+//! interpreter's `--version` (a project-chosen one only in an opened folder the user trusts), so call it off the UI
+//! thread.
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -18,6 +19,9 @@ pub struct Configured {
     pub packages: Option<PathBuf>,
     /// Which setting names it, as the user is told it.
     pub source: String,
+    /// Named by an absolute path in Lenz's provider settings: the user's own interpreter, not one the project chose
+    /// (a relative `pythonPath` names a file of whichever project is open).
+    pub own: bool,
 }
 
 impl Configured {
@@ -51,9 +55,10 @@ pub fn configured(root: &Path, settings: &Value) -> Result<Option<Configured>, S
             return Err(format!("{} is not a Python environment: it has no lib/python3.*/site-packages folder ({source}). Lenz does not start Pyright with another environment: recreate it or correct the setting, {AFTER}", prefix.display()));
         };
         let interpreter = prefix.join(BIN).join(if cfg!(windows) { "python.exe" } else { "python" });
-        return Ok(Some(Configured { prefix: Some(prefix), interpreter: Some(interpreter), packages: Some(packages), source }));
+        return Ok(Some(Configured { prefix: Some(prefix), interpreter: Some(interpreter), packages: Some(packages), source, own: false }));
     }
     let Some(python) = setting("pythonPath") else { return Ok(None) };
+    let own = Path::new(python).is_absolute();
     let python = root.join(python);
     let source = "python.pythonPath in Lenz's provider settings".to_owned();
     if !python.is_file() {
@@ -62,17 +67,24 @@ pub fn configured(root: &Path, settings: &Value) -> Result<Option<Configured>, S
     // An interpreter inside a virtual environment (`<prefix>/bin/python`).
     let prefix = python.parent().and_then(Path::parent).filter(|p| p.join("pyvenv.cfg").is_file()).map(Path::to_owned);
     let packages = prefix.as_deref().and_then(site_packages);
-    Ok(Some(Configured { prefix, interpreter: Some(python), packages, source }))
+    Ok(Some(Configured { prefix, interpreter: Some(python), packages, source, own }))
 }
 
 /// One line for Server Details: the environment Pyright uses for `root` (a configured one, else the first `python3`,
-/// else `python`, on `path`), its Python version, and an unconfigured project environment it does not use. `Err`
+/// else `python`, on `path`), its Python version, and an unconfigured project environment it does not use. An
+/// interpreter the project chose runs for its version only inside `trusted`, the opened folder the user trusts. `Err`
 /// as [`configured`]'s.
-pub fn describe(root: &Path, settings: &Value, path: Option<&std::ffi::OsStr>) -> Result<String, String> {
+pub fn describe(root: &Path, settings: &Value, path: Option<&std::ffi::OsStr>, trusted: Option<&Path>) -> Result<String, String> {
     let version = |python: &Path| super::runtime::version_in(python, "--version", &[], Some(root)).map(|v| v.lines().next().unwrap_or_default().trim().to_owned()).unwrap_or_else(|e| format!("Python version unknown ({})", e.lines().next().unwrap_or_default()));
     if let Some(c) = configured(root, settings)? {
         let recorded = c.prefix.as_deref().and_then(recorded_version);
-        let version = recorded.unwrap_or_else(|| c.interpreter.as_deref().map_or_else(|| "Python version unknown".into(), version));
+        let version = recorded.unwrap_or_else(|| match c.interpreter.as_deref() {
+            None => "Python version unknown".into(),
+            // The project's choice of interpreter is the project's program.
+            Some(python) if c.own || trusted.is_some_and(|t| python.starts_with(t)) => version(python),
+            Some(_) if trusted.is_some() => "Python version unknown (its pyvenv.cfg records none, and Lenz does not run a project's interpreter outside the trusted folder)".into(),
+            Some(_) => "Python version unknown (its pyvenv.cfg records none, and Lenz runs a project's interpreter only in an opened folder you trust: choose Trust Project Tools in This Folder)".into(),
+        });
         let mut line = match &c.prefix {
             Some(prefix) => format!("Python environment: {} ({}), {version}", prefix.display(), c.source),
             None => format!("Python environment: interpreter {} ({}), {version}", c.interpreter.as_deref().unwrap_or(Path::new("")).display(), c.source),
@@ -241,7 +253,7 @@ mod tests {
         let other = write(root, "other/bin/python", "");
         let settings = json!({ "pythonPath": other });
         assert_eq!(configured(root, &settings).unwrap().unwrap().prefix.as_deref(), Some(env.as_path()));
-        let line = describe(root, &settings, None).unwrap();
+        let line = describe(root, &settings, None, None).unwrap();
         assert_eq!(line, format!("Python environment: {} (venv \"env\" with venvPath \".\" in {}), Python 3.13.1; installed packages from {}", env.display(), config.display(), env.join("lib/python3.13/site-packages").display()));
     }
 
@@ -274,7 +286,7 @@ mod tests {
         let config = write(root, "pyrightconfig.json", "{ \"venvPath\": \".\", \"venv\": \"gone\" }");
         let why = configured(root, &Value::Null).unwrap_err();
         assert_eq!(why, format!("The configured Python environment {} does not exist (venv \"gone\" with venvPath \".\" in {}). Lenz does not start Pyright with another environment: create it (for example `python3 -m venv {}`) or correct the setting, then choose Restart Language Server", root.join("gone").display(), config.display(), root.join("gone").display()));
-        assert_eq!(describe(root, &Value::Null, None).unwrap_err(), why);
+        assert_eq!(describe(root, &Value::Null, None, None).unwrap_err(), why);
         std::fs::create_dir(root.join("gone")).unwrap();
         let why = configured(root, &Value::Null).unwrap_err();
         assert!(why.starts_with(&format!("{} is not a Python environment: it has no lib/python3.*/site-packages folder", root.join("gone").display())), "{why}");
@@ -294,13 +306,38 @@ mod tests {
         let env = venv(root, "venv", "3.13.2");
         let python = write(root, "venv/bin/python", "");
         let found = configured(root, &json!({ "pythonPath": python })).unwrap().unwrap();
-        assert_eq!(found, Configured { prefix: Some(env.clone()), interpreter: Some(python.clone()), packages: Some(env.join("lib/python3.13/site-packages")), source: "python.pythonPath in Lenz's provider settings".into() });
+        assert_eq!(found, Configured { prefix: Some(env.clone()), interpreter: Some(python.clone()), packages: Some(env.join("lib/python3.13/site-packages")), source: "python.pythonPath in Lenz's provider settings".into(), own: true });
         assert_eq!(found.tools(), Some(env.join("bin")));
         // An interpreter outside a virtual environment: its version is asked.
         let system = script(root, "system/bin/python3", "#!/bin/sh\necho 'Python 3.11.9'\n");
         let found = configured(root, &json!({ "pythonPath": system })).unwrap().unwrap();
         assert_eq!((found.prefix, found.packages), (None, None));
-        assert_eq!(describe(root, &json!({ "pythonPath": system }), None).unwrap(), format!("Python environment: interpreter {} (python.pythonPath in Lenz's provider settings), Python 3.11.9", system.display()));
+        assert_eq!(describe(root, &json!({ "pythonPath": system }), None, None).unwrap(), format!("Python environment: interpreter {} (python.pythonPath in Lenz's provider settings), Python 3.11.9", system.display()));
+    }
+
+    #[test]
+    fn a_project_chosen_interpreter_runs_only_in_a_trusted_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let marker = dir.path().join("ran");
+        // A configured environment without a recorded version, whose interpreter is the project's script.
+        write(&root, "pyrightconfig.json", "{ \"venvPath\": \".\", \"venv\": \"env\" }");
+        std::fs::create_dir_all(root.join("env/lib/python3.12/site-packages")).unwrap();
+        script(&root, "env/bin/python", &format!("#!/bin/sh\ntouch '{}'\necho 'Python 3.12.0'\n", marker.display()));
+        let line = describe(&root, &Value::Null, None, None).unwrap();
+        assert!(line.contains("Python version unknown") && line.contains("Trust Project Tools in This Folder"), "{line}");
+        assert!(!marker.exists(), "an untrusted project's interpreter ran");
+        // A folder that is not the trusted one (or holds it) does not trust it.
+        let line = describe(&root, &Value::Null, None, Some(&root.join("elsewhere"))).unwrap();
+        assert!(!marker.exists(), "a project outside the trusted folder ran");
+        assert!(line.contains("outside the trusted folder"), "{line}");
+        // A relative pythonPath names the open project's file: the project's program too.
+        std::fs::remove_file(root.join("pyrightconfig.json")).unwrap();
+        let relative = describe(&root, &json!({ "pythonPath": "env/bin/python" }), None, None).unwrap();
+        assert!(relative.contains("Trust Project Tools in This Folder") && !marker.exists(), "{relative}");
+        write(&root, "pyrightconfig.json", "{ \"venvPath\": \".\", \"venv\": \"env\" }");
+        let line = describe(&root, &Value::Null, None, Some(&root)).unwrap();
+        assert!(line.contains("Python 3.12.0") && marker.exists(), "{line}");
     }
 
     #[test]
@@ -313,10 +350,10 @@ mod tests {
         let python3 = script(&bin, "python3", "#!/bin/sh\necho 'Python 3.10.1'\n");
         let path = std::env::join_paths([&bin]).unwrap();
         assert_eq!(configured(&root, &Value::Null).unwrap(), None);
-        assert_eq!(describe(&root, &Value::Null, Some(&path)).unwrap(), format!("Python environment: none configured, so Pyright uses the first python3 (else python) on its PATH: {} (Python 3.10.1). {} holds a virtual environment that is not configured, so Pyright does not use it. To use a project environment, set venvPath and venv in pyrightconfig.json or [tool.pyright] in pyproject.toml, or python.pythonPath in Lenz's provider settings", python3.display(), root.join(".venv").display()));
+        assert_eq!(describe(&root, &Value::Null, Some(&path), None).unwrap(), format!("Python environment: none configured, so Pyright uses the first python3 (else python) on its PATH: {} (Python 3.10.1). {} holds a virtual environment that is not configured, so Pyright does not use it. To use a project environment, set venvPath and venv in pyrightconfig.json or [tool.pyright] in pyproject.toml, or python.pythonPath in Lenz's provider settings", python3.display(), root.join(".venv").display()));
         let empty = tempfile::tempdir().unwrap();
         let path = std::env::join_paths([empty.path()]).unwrap();
-        let line = describe(empty.path(), &Value::Null, Some(&path)).unwrap();
+        let line = describe(empty.path(), &Value::Null, Some(&path), None).unwrap();
         assert!(line.starts_with("Python environment: none configured, and no python3 or python is on Pyright's PATH, so it resolves only the standard library's bundled stubs and the project's own files."), "{line}");
     }
 }

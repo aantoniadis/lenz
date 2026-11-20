@@ -603,7 +603,7 @@ fn diff_attrs(root: &Path, list: &[Comparison]) -> Result<Attrs, String> {
             "unset" => DiffAttr::Binary,
             "unspecified" => continue,
             driver => match (textconv.get(driver), binary.get(driver)) {
-                (Some(command), _) if !command.is_empty() => DiffAttr::Textconv(command.clone()),
+                // first: Lenz runs a textconv command itself, and must never run the repository's
                 _ if untrusted.textconv.iter().any(|t| t == driver) => {
                     skipped.insert(path.to_owned(), not_run("textconv driver", driver));
                     match binary.get(driver) {
@@ -612,6 +612,7 @@ fn diff_attrs(root: &Path, list: &[Comparison]) -> Result<Attrs, String> {
                         None => continue,
                     }
                 }
+                (Some(command), _) if !command.is_empty() => DiffAttr::Textconv(command.clone()),
                 (Some(_), _) => continue, // set empty: no textconv
                 (None, Some(true)) => DiffAttr::Binary,
                 (None, Some(false)) => DiffAttr::Text,
@@ -658,10 +659,13 @@ pub(crate) fn list_git(
             .map(|f| git::path_text(f).map(str::to_owned)).collect()
     };
 
-    let mut diff = vec!["diff", "--raw", "-z", "--no-abbrev", "-M", "--no-relative", "--no-color"];
+    // `dirty`: git would otherwise run `status` inside each nested repository, under that repository's own config
+    let mut diff = vec!["diff", "--raw", "-z", "--no-abbrev", "-M", "--no-relative", "--no-color", "--ignore-submodules=dirty"];
     if cached {
         diff.push("--cached");
     }
+    // revisions are never options, whatever named them
+    diff.push("--end-of-options");
     diff.extend(revs.iter().map(String::as_str));
     diff.extend(&pathspec);
     let raw = fields(&git::run(cwd, &diff)?)?;
@@ -729,7 +733,7 @@ pub(crate) fn list_git(
 
     if worktree {
         let untracked_files = if untracked { "--untracked-files=all" } else { "--untracked-files=no" };
-        let mut args = vec!["status", "--porcelain=v2", "-z", untracked_files];
+        let mut args = vec!["status", "--porcelain=v2", "-z", "--ignore-submodules=dirty", untracked_files];
         args.extend(&pathspec);
         let status = fields(&git::run(cwd, &args)?)?;
         let mut status = status.into_iter();
@@ -758,7 +762,9 @@ pub(crate) fn list_git(
     list.retain(|c| !unmerged.contains(&c.path));
     for path in unmerged {
         let file = root.join(&path);
-        let right = if file.symlink_metadata().is_ok() { Content::File(file) } else { Content::Empty };
+        // a path under a working-tree folder link is not the working-tree file
+        let inside = file.symlink_metadata().is_ok() && crate::write::check_repository_path(root, &file, true).is_ok();
+        let right = if inside { Content::File(file) } else { Content::Empty };
         let left = Content::Blob(format!("HEAD:{path}"));
         list.push(Comparison { old_path: path.clone(), path, status: Status::Conflicted, left, right });
     }
@@ -935,7 +941,9 @@ fn same_file_content(left: &Path, right: &Path) -> Result<bool, String> {
 
 /// Every file of a compared folder by `/`-separated relative path: inside a git work tree (and not itself ignored)
 /// the files git lists, tracked and untracked but not ignored, and those of its submodules and nested repositories;
-/// else every file under it.
+/// else every file under it. Only rules the comparison shows (in-tree `.gitignore` files, listed even when they
+/// ignore themselves) or the user's own global excludes skip a file: never `.git/info/exclude` or a
+/// repository-local `core.excludesFile`, which arrive with the compared folder's `.git` and are never compared.
 fn files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     // `git difftool -d` exports GIT_DIR and GIT_WORK_TREE, and git would then list that repository's files for
     // its temporary folders.
@@ -943,15 +951,39 @@ fn files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     if env("GIT_DIR") || env("GIT_WORK_TREE") || !git::may_be_in_repository(root) {
         return walk(root);
     }
+    let global = user_excludes_file(root).map(|file| format!("--exclude-from={}", file.display()));
+    let excludes = ["--exclude-per-directory=.gitignore"].into_iter().chain(global.as_deref());
+    let listing: Vec<&str> = ["ls-files", "-co", "-z"].into_iter().chain(excludes.clone()).collect();
     // Fails outside a work tree (and inside `.git`); lists nothing in an ignored folder such as `target/`.
-    let out = match git::run(root, &["ls-files", "-co", "--exclude-standard", "-z"]) {
+    let mut out = match git::run(root, &listing) {
         Ok(out) if !out.is_empty() || git::run(root, &["check-ignore", "-q", "."]).is_err() => out,
         _ => return walk(root),
     };
+    // A `.gitignore` that ignores itself would hide its rules; `--directory` keeps git out of ignored folders.
+    let ignored: Vec<&str> = ["ls-files", "-o", "-i", "--directory", "-z"].into_iter().chain(excludes)
+        .chain(["--", ".gitignore", ":(glob)**/.gitignore"]).collect();
+    match git::run(root, &ignored) {
+        Ok(more) => out.extend(more.split(|&b| b == 0).filter(|e| e.ends_with(b".gitignore")).flat_map(|e| [e, b"\0"]).flatten()),
+        Err(_) => return walk(root),
+    }
     let mut files = BTreeMap::new();
+    // Folders below `root` reached through a symlink, by relative path: each folder is looked at once.
+    let mut linked: HashMap<PathBuf, bool> = HashMap::new();
+    fn through_link(root: &Path, dir: &Path, linked: &mut HashMap<PathBuf, bool>) -> bool {
+        if dir.as_os_str().is_empty() { return false; }
+        if let Some(&known) = linked.get(dir) { return known; }
+        let link = through_link(root, dir.parent().unwrap_or(Path::new("")), linked)
+            || root.join(dir).symlink_metadata().is_ok_and(|m| m.is_symlink());
+        linked.insert(dir.to_path_buf(), link);
+        link
+    }
     for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
         let rel = git::path_text(entry)?.trim_end_matches('/').to_string();
         let path = root.join(&rel);
+        // like walk(), never list a file through a folder symlink below the compared folder
+        if through_link(root, Path::new(&rel).parent().unwrap_or(Path::new("")), &mut linked) {
+            continue;
+        }
         if path.is_file() {
             files.insert(rel, path);
         } else if path.symlink_metadata().is_ok_and(|m| m.is_dir()) {
@@ -961,6 +993,35 @@ fn files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
         // Else a deleted tracked file, or a link to a folder.
     }
     Ok(files)
+}
+
+/// The user's own excludes file, as git finds it: `core.excludesFile` from the global, system or command-line config
+/// (never the compared repository's), else `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`; `None` unless it
+/// exists, since `ls-files --exclude-from` fails on a missing file.
+fn user_excludes_file(root: &Path) -> Option<PathBuf> {
+    let out = git::run(root, &["config", "--show-scope", "--type=path", "-z", "--get-all", "core.excludesFile"]).unwrap_or_default();
+    let file = match users_excludes_value(&out) {
+        Some(value) => PathBuf::from(git::path_text(value).ok()?),
+        None => {
+            let base = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+            base.join("git/ignore")
+        }
+    };
+    (!file.as_os_str().is_empty() && root.join(&file).is_file()).then(|| root.join(file))
+}
+
+/// The last `core.excludesFile` the user set, from `git config --show-scope -z --get-all` output
+/// (`<scope>\0<value>\0` per entry): a repository's own (`local`, `worktree`) value is skipped.
+fn users_excludes_value(out: &[u8]) -> Option<&[u8]> {
+    let mut fields = out.split(|&b| b == 0);
+    let mut configured = None;
+    while let (Some(scope), Some(value)) = (fields.next(), fields.next()) {
+        if matches!(scope, b"global" | b"system" | b"command") {
+            configured = Some(value);
+        }
+    }
+    configured
 }
 
 /// Every file under `root` by `/`-separated relative path, `.git` aside. Symlinks are read through, never descended
@@ -1364,6 +1425,37 @@ mod tests {
     }
 
     #[test]
+    fn a_revision_is_never_a_git_diff_option() {
+        let r = repo();
+        write(r.path(), "f", "a\n");
+        commit_all(r.path(), "1");
+        write(r.path(), "f", "b\n");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("written");
+        let rev = format!("--output={}", target.display());
+        assert!(ChangeSet::load(&git_spec(false, &[&format!("{rev}^1"), &rev], &[], false), r.path()).is_err());
+        assert!(ChangeSet::load(&git_spec(false, &[&rev], &[], false), r.path()).is_err());
+        assert!(!target.exists() && !elsewhere.path().join("written^1").exists(), "git diff wrote a file");
+    }
+
+    #[test]
+    fn a_nested_repositorys_own_config_runs_nothing_on_load() {
+        let elsewhere = tempfile::tempdir().unwrap();
+        let ran = elsewhere.path().join("ran");
+        let hook = elsewhere.path().join("hook.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", ran.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let r = crate::git::testing::nested_with_fsmonitor(&hook);
+        let set = load(r.path(), git_spec(false, &[], &[], true));
+        assert!(!ran.exists(), "git ran status inside the nested repository");
+        assert!(set.comparisons.is_empty(), "{:?}", listing(&set));
+        assert!(crate::conflicts::list(r.path()).unwrap().is_empty());
+        assert!(!ran.exists());
+        crate::git::testing::try_git(r.path(), &["status"]);
+        assert!(ran.exists(), "git itself runs it");
+    }
+
+    #[test]
     fn a_textconv_driver_turns_a_side_into_text() {
         let r = repo();
         crate::git::trust(r.path()); // as if the driver were in the user's global config
@@ -1609,6 +1701,68 @@ mod tests {
         write(r.path(), "plain/a/out", "2\n");
         let set = plain(r.path(), "target", "plain").unwrap();
         assert_eq!(listing(&set), [("a/out", Status::Modified)]);
+    }
+
+    #[test]
+    fn exclude_rules_inside_a_compared_folder_s_git_hide_nothing() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        for side in ["left", "right"] {
+            write(d.path(), &format!("{side}/a.txt"), "a\n");
+        }
+        write(d.path(), "right/evil.sh", "touch marker\n");
+        write(d.path(), "right/lib/evil2.sh", "touch marker\n");
+        git(&d.path().join("right"), &["init", "-q"]);
+        write(d.path(), "right/.git/info/exclude", "evil.sh\n");
+        write(d.path(), "right/.git/hide", "evil2.sh\n");
+        std::fs::OpenOptions::new().append(true).open(d.path().join("right/.git/config")).unwrap()
+            .write_all(b"[core]\n\texcludesFile = .git/hide\n").unwrap();
+        let set = plain(d.path(), "left", "right").unwrap();
+        assert_eq!(listing(&set), [("evil.sh", Status::Added), ("lib/evil2.sh", Status::Added)]);
+    }
+
+    #[test]
+    fn only_the_user_s_own_excludes_file_is_used() {
+        use std::io::Write;
+        assert_eq!(users_excludes_value(b"system\0/etc/ignore\0global\0/home/u/ignore\0local\0.git/hide\0"), Some(&b"/home/u/ignore"[..]));
+        assert_eq!(users_excludes_value(b"local\0.git/hide\0worktree\0x\0"), None);
+        assert_eq!(users_excludes_value(b"command\0/c\0"), Some(&b"/c"[..]));
+        assert_eq!(users_excludes_value(b""), None);
+        // the repository's own value never reaches the listing
+        let r = repo();
+        write(r.path(), ".git/hide", "a.txt\n");
+        std::fs::OpenOptions::new().append(true).open(r.path().join(".git/config")).unwrap()
+            .write_all(b"[core]\n\texcludesFile = .git/hide\n").unwrap();
+        assert_ne!(user_excludes_file(r.path()), Some(r.path().join(".git/hide")));
+    }
+
+    #[test]
+    fn a_gitignore_that_ignores_itself_is_listed_with_what_it_hides() {
+        let r = repo();
+        write(r.path(), ".gitignore", "target/\n");
+        write(r.path(), "drop1/a.txt", "a\n");
+        write(r.path(), "drop2/a.txt", "a\n");
+        write(r.path(), "drop2/.gitignore", "/.gitignore\n/evil.sh\n");
+        write(r.path(), "drop2/evil.sh", "touch marker\n");
+        // a .gitignore inside an ignored folder hides nothing more and stays out of the listing
+        write(r.path(), "drop2/build/.gitignore", "*\n");
+        write(r.path(), "drop2/.gitignore", "/.gitignore\n/evil.sh\nbuild/\n");
+        let set = plain(r.path(), "drop1", "drop2").unwrap();
+        assert_eq!(listing(&set), [(".gitignore", Status::Added)]);
+    }
+
+    #[test]
+    fn a_folder_symlink_inside_a_compared_work_tree_is_not_listed_through() {
+        let r = repo();
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "target", "victim\n");
+        write(r.path(), "right/ln/target", "tracked\n");
+        commit_all(r.path(), "1");
+        std::fs::remove_dir_all(r.path().join("right/ln")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), r.path().join("right/ln")).unwrap();
+        write(r.path(), "left/ln/target", "left text\n");
+        let set = plain(r.path(), "left", "right").unwrap();
+        assert_eq!(listing(&set), [("ln/target", Status::Deleted)]);
     }
 
     #[test]

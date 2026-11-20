@@ -108,7 +108,9 @@ impl BranchTarget {
         match self {
             Self::Branch(b) => Some(git_branches::Target::Branch(b.clone())),
             Self::Remote(r) => Some(git_branches::Target::Remote(r.clone())),
-            Self::Tag(t) | Self::Revision(t) => Some(git_branches::Target::Detached(t.clone())),
+            // Fully named: a branch, remote, `$GIT_DIR` file or object id sharing a tag's short name must not win.
+            Self::Tag(t) => Some(git_branches::Target::Detached(format!("refs/tags/{t}"))),
+            Self::Revision(t) => Some(git_branches::Target::Detached(t.clone())),
             Self::Action(_) | Self::Worktree(_) => None,
         }
     }
@@ -371,7 +373,9 @@ impl crate::session::Session {
             GitDiff::BranchChanges(from) => git_branches::changes_since(root, &repo.git_dir, from.as_deref()).map_err(fail)?,
             GitDiff::BaseBranch => {
                 git_branches::verify_commit(root, "HEAD").map_err(|_| fail("there is no commit yet".into()))?;
-                git_branches::default_base(root).ok_or_else(|| fail("no main or master branch to compare with".into()))?.name
+                let base = git_branches::default_base(root).ok_or_else(|| fail("no main or master branch to compare with".into()))?.name;
+                let sha = git_branches::verify_commit(root, &base).map_err(fail)?;
+                by_name(root, &base, sha)
             }
         };
         let program = crate::session::lenz_diff(exe, terminal, what)?;

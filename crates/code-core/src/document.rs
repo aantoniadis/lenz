@@ -38,6 +38,8 @@ pub struct SourceMeta {
     had_bom: bool,
     shown_encoding: bool,
     lossy: bool,
+    /// A guessed encoding read ASCII punctuation bytes as parts of characters.
+    hides_ascii: bool,
     binary: bool,
     language: Option<Language>,
     image: Option<Arc<Image>>,
@@ -84,6 +86,9 @@ impl SourceMeta {
         }
         if self.lossy {
             notices.push(encoding::LOSSY_NOTICE.into());
+        }
+        if self.hides_ascii {
+            notices.push(encoding::HIDES_ASCII_NOTICE.into());
         }
         if large {
             notices.push("Large file: syntax highlighting off".into());
@@ -157,6 +162,7 @@ impl Document {
                 had_bom: decoded.had_bom,
                 shown_encoding: decoded.shown_in_header(),
                 lossy: decoded.lossy,
+                hides_ascii: decoded.hides_ascii,
                 binary,
                 language,
                 source,
@@ -190,6 +196,7 @@ impl Document {
             had_bom: decoded.had_bom,
             shown_encoding: decoded.shown_in_header(),
             lossy: decoded.lossy,
+            hides_ascii: decoded.hides_ascii,
             binary: false,
             language: None,
             source,
@@ -508,6 +515,12 @@ mod tests {
         odd.extend("a".encode_utf16().flat_map(u16::to_le_bytes));
         odd.push(b'x');
         assert!(doc("a.txt", &odd).notices().contains(&encoding::LOSSY_NOTICE.to_string()));
+        // a guessed Shift_JIS that reads `\x83` + backtick as one katakana says so
+        // "# 設定を表示" in Shift_JIS
+        let sjis = doc("run.sh", b"# \x90\xDD\x92\xE8\x82\xF0\x95\x5C\x8E\xA6\necho \"mode: \x83`touch marker #\x83`\"\n");
+        assert_eq!(sjis.notices(), ["Encoding: Shift_JIS".to_string(), encoding::HIDES_ASCII_NOTICE.into()]);
+        assert!(!sjis.line(1).contains('`'));
+        assert!(!latin.notices().contains(&encoding::HIDES_ASCII_NOTICE.to_string()));
     }
 
     #[test]

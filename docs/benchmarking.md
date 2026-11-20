@@ -90,6 +90,18 @@ checkout/target and compare public root-path samples across executables. The
 private reference can have different compiler output even for identical code;
 it is a correctness oracle, not sufficient evidence of baseline preservation.
 
+The Lenz Diff archive probe loads a plain Change Set of two archives that differ in one member,
+for zip, gzip tar and stored-block Zstd tar, with 5,000 × 2 KiB and 32 × 2 MiB text members:
+
+```sh
+cargo test --locked --release -p lenz --no-default-features --lib archive_change_set_release_probe -- --ignored --nocapture
+```
+
+`LENZ_ARCHIVE_PROBE` version 1 records eleven `ChangeSet::load` wall times per case after one warm-up,
+the per-load RSS growth above the RSS before it (`VmHWM` reset through `/proc/self/clear_refs`, Linux only),
+and the load average. It excludes frontends, member reads and Folder Summary counts. Compare builds by
+copying each test executable and alternating them.
+
 `scripts/code-editor-gui-bench.py` schema 2 drains preceding XDamage events before
 rearming the NonEmpty damage region. Older versions could discard a late paint
 notification after rearming, leaving the region nonempty and suppressing the

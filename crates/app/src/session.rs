@@ -87,7 +87,7 @@ impl Session {
         }
         if let Some(rx)=&self.reading{
             match rx.try_recv(){
-                Ok(Some(Ok(prepared)))=>{self.reading=None;let (lp,rp)=self.paths(self.state.current);let text=if prepared.image.is_some(){self.writes.recover(self.state.current,[&lp,&rp])}else{self.writes.overlay(self.state.current,&prepared.text,[&lp,&rp])}.unwrap_or(prepared.text);let doc=Arc::new(text);self.image=if self.writes.dirty(self.current()){None}else{prepared.image.map(|result|result.map(Arc::new))};self.state.show_text(&doc,self.place);self.document=Some(doc);self.compare();changed=true;},
+                Ok(Some(Ok(prepared)))=>{self.reading=None;let (lp,rp)=self.paths(self.state.current);let text=if prepared.image.as_ref().is_some_and(|r|r.is_ok()){self.writes.recover(self.state.current,[&lp,&rp])}else{self.writes.overlay(self.state.current,&prepared.text,[&lp,&rp])}.unwrap_or(prepared.text);let doc=Arc::new(text);self.image=if self.writes.dirty(self.current()){None}else{prepared.image.map(|result|result.map(Arc::new))};self.state.show_text(&doc,self.place);self.document=Some(doc);self.compare();changed=true;},
                 Ok(Some(Err(e)))=>{self.reading=None;self.recover_failure(e);changed=true;},
                 Ok(None)=>{self.reading=None;self.recover_failure("Comparison loading was interrupted".into());changed=true;},
                 Err(TryRecvError::Disconnected)=>{self.reading=None;self.interrupted();changed=true;},
@@ -158,7 +158,8 @@ impl Session {
     }
     fn compare(&mut self){
         let Some(doc)=self.document.clone()else{return;};
-        if doc.placeholder_kind().is_some()||self.image.as_ref().is_some_and(|r|r.is_ok()){self.state.diffed=self.state.generation;return;}
+        // an SVG's source is diffed for its Source mode; a raster image has no text
+        if doc.placeholder_kind().is_some()||self.image.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|i|!i.source)){self.state.diffed=self.state.generation;return;}
         let(options,rows,mode,collapse,folds,place)=(self.state.options,self.state.view.viewport_rows(),self.state.view.mode(),self.state.collapse,
             self.state.folds.get(&self.state.current).cloned().unwrap_or_default(),self.place);
         let position=matches!(place,Place::Anchor(_)).then(||self.state.view.recompare_position());

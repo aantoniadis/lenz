@@ -209,7 +209,8 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         Placeholder::Large { bytes } => format!("Oversized comparison ({:.1} MiB). Enter to load.", *bytes as f64 / (1 << 20) as f64),
         Placeholder::Unreadable(e) => e.clone(),
     });
-    if let Some(message) = placeholder.as_deref().filter(|_|app.visual.image().is_none()).or_else(|| app.session.loading().then_some("Loading comparison…  q quits; file navigation remains available")).filter(|_|!summary) {
+    // a rendering is drawn while an SVG's source is still being diffed
+    if let Some(message) = placeholder.as_deref().or_else(|| app.session.loading().then_some("Loading comparison…  q quits; file navigation remains available")).filter(|_|!summary&&app.visual.image().is_none()) {
         label(palette,frame, Rect::new(area.x+1, area.y+3.min(area.height - 1), area.width.saturating_sub(2), 1), message, base(palette).fg(color(palette.accent)));
     }
     for (i,record) in app.session.applied().iter().rev().take(if summary{0}else{applied_rows}).collect::<Vec<_>>().into_iter().rev().enumerate(){
@@ -417,8 +418,9 @@ mod tests {
         let mut app = App::new(lenz::session::Session::open(request, dir.path().into()));
         ready(&mut app);
         assert_eq!(app.session.comparisons().len(), 2);
-        let mut terminal = Terminal::new(TestBackend::new(160, 20)).unwrap();
-        let header = |terminal: &Terminal<TestBackend>,y:u16| terminal.backend().buffer().content[160*usize::from(y)..160*usize::from(y+1)].iter().map(|cell| cell.symbol()).collect::<String>();
+        // wide enough for both titles beside the SVG's five modes (Source included) at the header's right end
+        let mut terminal = Terminal::new(TestBackend::new(170, 20)).unwrap();
+        let header = |terminal: &Terminal<TestBackend>,y:u16| terminal.backend().buffer().content[170*usize::from(y)..170*usize::from(y+1)].iter().map(|cell| cell.symbol()).collect::<String>();
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(app.visual.image().is_some());
         let (left, right) = app.session.labels();

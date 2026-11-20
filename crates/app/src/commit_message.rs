@@ -54,10 +54,12 @@ pub struct Messages { pub query: Query, pub commits: Vec<Commit>, pub open: Vec<
 pub fn read(root: &Path, query: &Query) -> Result<Messages, String> {
     let limit = format!("-n{}", RANGE_LIMIT + 1);
     let rev = match query { Query::One(sha) => sha, Query::Range(range) => range };
-    let out = crate::git::run(root, &["log", "--no-show-signature", "--no-notes", "--date=format:%Y-%m-%d %H:%M",
-        "--format=%H%x00%aN%x00%ad%x00%B%x1e", if matches!(query, Query::One(_)) { "-n1" } else { &limit }, "--end-of-options", rev, "--"])?;
-    let mut commits: Vec<Commit> = String::from_utf8_lossy(&out).split('\x1e').filter_map(|record| {
-        let mut f = record.trim_start_matches('\n').splitn(4, '\0');
+    // NUL-terminated records, LF between fields and the message last: git prints no NUL in these fields and no LF in
+    // a name or date, so commit text cannot move a record or field boundary.
+    let out = crate::git::run(root, &["log", "-z", "--no-show-signature", "--no-notes", "--date=format:%Y-%m-%d %H:%M",
+        "--format=%H%n%aN%n%ad%n%B", if matches!(query, Query::One(_)) { "-n1" } else { &limit }, "--end-of-options", rev, "--"])?;
+    let mut commits: Vec<Commit> = String::from_utf8_lossy(&out).split('\0').filter(|r| !r.is_empty()).filter_map(|record| {
+        let mut f = record.splitn(4, '\n');
         Some(Commit { sha: f.next()?.into(), author: f.next()?.into(), date: f.next()?.into(), message: f.next()?.into() })
     }).collect();
     let more = commits.len() > RANGE_LIMIT;
@@ -179,6 +181,31 @@ mod tests {
         range.open[1] = true;
         let texts: Vec<String> = range.lines(false, 80).into_iter().map(|l| l.text).collect();
         assert_eq!(texts[3..].iter().map(|t| t.trim()).collect::<Vec<_>>()[1..], ["body line one", "", "body line three"]);
+    }
+
+    #[test]
+    fn a_record_separator_in_an_author_or_body_keeps_every_commit_whole() {
+        let root = repo();
+        let r = root.path();
+        write(r, "f", "a\n"); commit_all(r, "base");
+        write(r, "f", "b\n"); commit_all(r, "plain");
+        write(r, "f", "c\n");
+        git(r, &["commit", "-qa", "--no-verify", "--author", "Eve\x1eve <eve@example.invalid>", "-m", "rs in author name"]);
+        write(r, "f", "d\n"); commit_all(r, "body subject\n\nshown line\x1etail line after RS");
+        write(r, "f", "e\n"); commit_all(r, "tip");
+        let range = read(r, &Query::Range("HEAD~4..HEAD".into())).unwrap();
+        assert_eq!(range.commits.iter().map(Commit::subject).collect::<Vec<_>>(), ["tip", "body subject", "rs in author name", "plain"]);
+        assert_eq!(range.commits[1].message.trim_end(), "body subject\n\nshown line\x1etail line after RS");
+        assert_eq!(range.commits[2].author, "Eve\x1eve");
+        assert_eq!(range.lines(false, 80)[0].text, "▾ 4 commits");
+        let eve = read(r, &Query::One(head(r, "HEAD~2"))).unwrap();
+        assert_eq!((eve.commits.len(), eve.commits[0].author.as_str()), (1, "Eve\x1eve"));
+        let body = read(r, &Query::One(head(r, "HEAD~1"))).unwrap();
+        assert!(body.commits[0].message.contains("tail line after RS"));
+        // a .mailmap name with the separator renames, and hides nothing
+        write(r, ".mailmap", "Dev\x1eTeam <t@t>\n");
+        let mapped = read(r, &Query::Range("HEAD~4..HEAD".into())).unwrap();
+        assert_eq!(mapped.commits.iter().map(|c| c.author.as_str()).collect::<Vec<_>>(), ["Dev\x1eTeam", "Dev\x1eTeam", "Eve\x1eve", "Dev\x1eTeam"]);
     }
 
     #[test]

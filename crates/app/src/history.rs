@@ -129,7 +129,7 @@ pub fn stream_limited(cwd: &Path, branches: &Branches, limit: u64) -> Result<Str
 
 /// Starts the same bounded stream limited to the CLI's Git pathspecs.
 pub fn stream_limited_paths(cwd: &Path, branches: &Branches, limit: u64, paths: &[String]) -> Result<Stream, String> {
-    let mut args = vec!["log", "-z", "--topo-order", "--parents", "--format=%H %P%x1f%an%x1f%ae%x1f%ct %ci%x1f%s"];
+    let mut args = vec!["log", "-z", "--topo-order", "--parents", "--format=%H %P%n%an%n%ae%n%ct %ci%n%s"];
     args.extend(branches.args());
     if !paths.is_empty() { args.push("--"); args.extend(paths.iter().map(String::as_str)); }
     let mut child = git::command(cwd)?
@@ -199,10 +199,11 @@ pub fn stream_limited_paths(cwd: &Path, branches: &Branches, limit: u64, paths: 
     Ok(Stream { child, batches, demand, reader: reader_ref })
 }
 
-/// `%H %P<US>%an<US>%ae<US>%ct %ci<US>%s`; `%ci` ends with the committer's UTC offset.
+/// `%H %P\n%an\n%ae\n%ct %ci\n%s`, one NUL-terminated record per commit; `%ci` ends with the committer's UTC
+/// offset. git prints no newline inside an ident or a subject, so author text cannot move a field boundary.
 fn parse_record(record: &[u8]) -> Option<Commit> {
     let text = String::from_utf8_lossy(record);
-    let mut fields = text.splitn(5, '\x1f');
+    let mut fields = text.splitn(5, '\n');
     let mut ids = fields.next()?.split(' ').filter(|s| !s.is_empty()).map(String::from);
     let (id, parents, author, email) = (ids.next()?, ids.collect(), fields.next()?.into(), fields.next()?.into());
     let stamp = fields.next()?;
@@ -747,10 +748,10 @@ mod tests {
 
     #[test]
     fn records_carry_the_committer_time_zone() {
-        let c = parse_record(b"abc def\x1fAnn\x1fann@x\x1f1791489600 2026-10-09 01:45:00 +0545\x1fSubject").unwrap();
+        let c = parse_record(b"abc def\nAnn\nann@x\n1791489600 2026-10-09 01:45:00 +0545\nSubject").unwrap();
         assert_eq!((c.time, c.offset, c.subject.as_str()), (1_791_489_600, 345, "Subject"));
-        assert_eq!(parse_record(b"abc\x1fAnn\x1fann@x\x1f1 1969-12-31 16:00:01 -0800\x1fS").unwrap().offset, -480);
-        assert!(parse_record(b"abc\x1fAnn\x1fann@x\x1f1\x1fS").is_none(), "a record without a zone is malformed");
+        assert_eq!(parse_record(b"abc\nAnn\nann@x\n1 1969-12-31 16:00:01 -0800\nS").unwrap().offset, -480);
+        assert!(parse_record(b"abc\nAnn\nann@x\n1\nS").is_none(), "a record without a zone is malformed");
         let mut log = Log::default();
         log.push(c);
         assert_eq!(log.stamp(0), "2026-10-09 01:45");
@@ -980,6 +981,26 @@ mod tests {
         let side = collect(stream(dir.path(), &Branches::One("refs/heads/side".into())).unwrap()).unwrap();
         assert_eq!((0..side.len()).map(|r| side.subject(r)).collect::<Vec<_>>(), ["two", "one"]);
         assert!(collect(stream(dir.path(), &Branches::One("nope".into())).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_unit_separator_in_an_author_ident_keeps_every_commit() {
+        let dir = repo();
+        let d = dir.path();
+        let authors = ["Mal\x1flory <mal@example.invalid>", "Erin <erin\x1fx@example.invalid>",
+            "Alice\x1falice@example.invalid\x1f1600000000 2020-09-13 12:26:40 +0000\x1fFix typo <mal@example.invalid>"];
+        for (i, author) in authors.iter().enumerate() {
+            write(d, "build.sh", format!("{i}\n"));
+            git(d, &["add", "-A"]);
+            git(d, &["commit", "-q", "--no-verify", "--author", author, "-m", &format!("c{i}")]);
+        }
+        let log = collect(stream(d, &Branches::All).unwrap()).unwrap();
+        let rows: Vec<_> = (0..log.len()).map(|r| (log.subject(r), log.author(r))).collect();
+        assert_eq!(rows, [
+            ("c2", ("Alice\x1falice@example.invalid\x1f1600000000 2020-09-13 12:26:40 +0000\x1fFix typo", "mal@example.invalid")),
+            ("c1", ("Erin", "erin\x1fx@example.invalid")),
+            ("c0", ("Mal\x1flory", "mal@example.invalid")),
+        ]);
     }
 
     /// Receive until `n` commits arrived, failing if more come or the stream ends first.

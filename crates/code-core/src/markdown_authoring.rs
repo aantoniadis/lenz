@@ -343,10 +343,13 @@ pub(crate) fn destination(before: &str) -> Option<Destination<'_>> {
 pub(crate) fn resolve(dir: &str, path: &str) -> Option<String> {
     let mut parts: Vec<String> = if path.starts_with('/') { Vec::new() } else { dir.split('/').filter(|p| !p.is_empty()).map(str::to_owned).collect() };
     for part in path.split('/') {
-        match part {
+        // Decode before classifying: `%2e%2e` is `..`, and an escaped `/` or NUL names no single file.
+        let part = decode(part)?;
+        if part.contains(['/', '\0']) { return None; }
+        match part.as_str() {
             "" | "." => {}
             ".." => { parts.pop()?; }
-            part => parts.push(decode(part)?),
+            _ => parts.push(part),
         }
     }
     Some(parts.join("/"))
@@ -525,6 +528,13 @@ mod tests {
         assert_eq!(resolve("", "my%20notes.md").as_deref(), Some("my notes.md"));
         assert_eq!(resolve("docs", "../.."), None);
         assert_eq!(resolve("", "bad%zz"), None);
+        assert_eq!(resolve("", "%2e%2e/secret.txt"), None);
+        assert_eq!(resolve("", "%2E%2E/secret.txt"), None);
+        assert_eq!(resolve("docs", "%2e%2e/a.md").as_deref(), Some("a.md"));
+        assert_eq!(resolve("", "..%2fsecret.txt"), None);
+        assert_eq!(resolve("", "a%2fb.md"), None);
+        assert_eq!(resolve("", "/%2fetc/passwd"), None);
+        assert_eq!(resolve("", "a%00.md"), None);
         assert_eq!(encode("my notes (draft)#1 100%.md"), "my%20notes%20%28draft%29%231%20100%25.md");
         assert_eq!(decode(&encode("a b(c)#%<>é")).as_deref(), Some("a b(c)#%<>é"));
     }

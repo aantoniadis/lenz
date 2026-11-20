@@ -10,7 +10,7 @@ impl Viewer {
         let surface=if self.merge.is_some(){Surface::Merge}else if self.picker_v.is_some(){Surface::VersionPicker}else{Surface::Comparison};
         // a loading file may still be Markdown: list View: Rendered, disabled with its reason
         let markdown=self.comparison.presentation_disabled(crate::markdown::PresentationMode::Rendered,self.doc().map(|d|&d.text))!=Some("Not a Markdown comparison");
-        Scope{surface,sticky:self.sticky_on,unified:self.comparison.view.unified(),repository:self.repo.is_some(),focused:self.layout.focused(self.repo.as_ref()),pr_tab:self.repo.as_ref().and_then(|r|r.pr.as_ref()).and_then(|p|p.details()).map(|d|d.tab),pr:self.repo.as_ref().is_some_and(|r|r.pr.is_some()),image:self.image_doc().is_some(),markdown,
+        Scope{surface,sticky:self.sticky_on,unified:self.comparison.view.unified(),repository:self.repo.is_some(),focused:self.layout.focused(self.repo.as_ref()),pr_tab:self.repo.as_ref().and_then(|r|r.pr.as_ref()).and_then(|p|p.details()).map(|d|d.tab),pr:self.repo.as_ref().is_some_and(|r|r.pr.is_some()),image:self.image_doc().is_some(),image_source:self.rendering_doc().is_some_and(|d|d.source),markdown,
               options:self.comparison.options,scroll:self.comparison.view.mode(),presentation:self.comparison.markdown_mode(),
               context_hidden:self.comparison.collapse,blame:self.blame_on,image_mode:self.iview.state().mode(),markdown_layout:self.comparison.markdown_layout(),find:self.find_open().then_some(self.comparison.find_options)}
     }
@@ -50,7 +50,7 @@ impl Viewer {
             Action::Edit(command)=>self.edit_menu(command,cx),
             Action::Folder(action)=>self.folder_action(action,cx),
             Action::File(file)=>{let set=self.set.clone();self.file_action(file,self.comparison.current,&set,cx);},
-            Action::Image(index)=>if let Some(entry)=crate::image_session::image_commands().get(index){let viewport=self.image_viewport(window);if let Some(doc)=self.image_doc(){self.iview.command(&doc,entry.command,viewport);}},
+            Action::Image(index)=>if let Some(entry)=crate::image_session::image_commands().get(index){let viewport=self.image_viewport(window);if let Some(doc)=self.rendering_doc(){self.iview.command(&doc,entry.command,viewport);}},
             Action::Repository(RepoAction::Refresh)=>self.refresh_repository(cx),
             Action::Repository(RepoAction::Branches)=>self.branch_menu(self.panes.viewport[0]/3.,cx),
             Action::Repository(RepoAction::Filter)=>{
@@ -240,7 +240,7 @@ impl Availability for Viewer {
                 let why=if file==crate::file_actions::FileAction::UndoLenz{self.comparison.markdown_edit_disabled().map(str::to_string)}else{None};
                 why.or_else(||self.file_disabled(file,self.comparison.current)).map(Cow::Owned)
             }
-            Action::Image(index)=>crate::image_session::image_commands().get(index).zip(self.image_doc()).and_then(|(e,doc)|e.disabled(&doc,self.iview.state())).map(Cow::Borrowed),
+            Action::Image(index)=>crate::image_session::image_commands().get(index).zip(self.rendering_doc()).and_then(|(e,doc)|e.disabled(&doc,self.iview.state())).map(Cow::Borrowed),
             Action::Repository(RepoAction::Refresh|RepoAction::Branches|RepoAction::NewBranch|RepoAction::CheckoutRevision)=>None,
             Action::Repository(RepoAction::Filter)=>None,
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches

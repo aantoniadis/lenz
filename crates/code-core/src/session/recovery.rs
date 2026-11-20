@@ -318,5 +318,5 @@ impl Session {
 
 /// A document from a record's text and the encoding the document had: a legacy encoding survives recovery.
 fn record_document(path: PathBuf, version: u64, text: &str, encoding: &'static str, bom: bool) -> Document {
-    Document::from_decoded(path, version, lenz_content::encoding::Decoded { text: text.to_owned(), encoding, had_bom: bom, lossy: false })
+    Document::from_decoded(path, version, lenz_content::encoding::Decoded { text: text.to_owned(), encoding, had_bom: bom, lossy: false, hides_ascii: false })
 }

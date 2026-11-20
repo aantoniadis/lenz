@@ -159,7 +159,7 @@ impl ConflictedFile {
 
 /// The Conflicted Files of the repository at `root` (its top level), in path order.
 pub fn list(root: &Path) -> Result<Vec<ConflictedFile>, String> {
-    let out = git::run(root, &["status", "--porcelain=v2", "-z", "--untracked-files=no"])?;
+    let out = git::run(root, &["status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignore-submodules=dirty"])?;
     let mut fields = out.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut files = Vec::new();
     while let Some(entry) = fields.next() {
@@ -384,7 +384,9 @@ pub fn mark_resolved(root: &Path, path: &str, delete: bool) -> Result<(), String
 /// (`checkout --conflict`). A one-sided conflict has no markers to write: only its stages come back.
 pub fn reopen(root: &Path, path: &str, style: Style) -> Result<(), String> {
     let conflict = format!("--conflict={}", style.name());
-    let Err(e) = git::run(root, &["--literal-pathspecs", "checkout", &conflict, "--", path]) else { return Ok(()) };
+    // the style reaches git's text merge standing in for a repository's merge driver (see `git::command`)
+    let config = format!("merge.conflictStyle={}", style.name());
+    let Err(e) = git::run(root, &["-c", &config, "--literal-pathspecs", "checkout", &conflict, "--", path]) else { return Ok(()) };
     // `--unresolve` succeeds silently when the index has nothing to restore
     git::run(root, &["update-index", "--unresolve", "--", path]).map_err(|_| e.clone())?;
     let restored = !git::run(root, &["--literal-pathspecs", "ls-files", "-u", "--", path])?.is_empty();
@@ -432,7 +434,7 @@ fn head_name(root: &Path) -> String {
 
 /// `76c12fd (topic: edit two)`, as git labels a picked commit; `rev` itself when it can't be read.
 fn describe(root: &Path, rev: &str) -> String {
-    let out = git::run(root, &["log", "-1", "--no-show-signature", "--format=%h (%s)", rev, "--"]);
+    let out = git::run(root, &["log", "-1", "--no-show-signature", "--format=%h (%s)", "--end-of-options", rev, "--"]);
     out.map(|o| String::from_utf8_lossy(&o).trim().to_string()).unwrap_or_else(|_| rev.to_string())
 }
 
@@ -838,6 +840,59 @@ mod tests {
         assert_eq!(list(d), Ok(vec![]));
         reopen(d, "l", Style::Merge).unwrap();
         assert_eq!(list(d), Ok(before));
+    }
+
+    #[test]
+    fn reopen_writes_gits_own_markers_not_a_repository_merge_drivers() {
+        let styles = if git::version().is_some_and(|v| v >= (2, 35)) { &[Style::Merge, Style::Diff3, Style::Zdiff3][..] } else { &[Style::Merge, Style::Diff3] };
+        let marked_conflict = || {
+            let dir = text_conflict();
+            assert!(!try_git(dir.path(), &["merge", "topic"]));
+            write(dir.path(), "f", "a\nboth\nc\n");
+            mark_resolved(dir.path(), "f", false).unwrap();
+            dir
+        };
+        let elsewhere = tempfile::tempdir().unwrap();
+        let ran = elsewhere.path().join("ran");
+        for &style in styles {
+            let plain = marked_conflict();
+            reopen(plain.path(), "f", style).unwrap();
+            let expected = fs::read(plain.path().join("f")).unwrap();
+            // selected by an attribute no one sees in the working tree, or by merge.default alone
+            for by_default in [false, true] {
+                let dir = marked_conflict();
+                let d = dir.path();
+                if by_default {
+                    git(d, &["config", "merge.default", "evil"]);
+                } else {
+                    fs::write(d.join(".git/info/attributes"), "* merge=evil\n").unwrap();
+                }
+                git(d, &["config", "merge.evil.driver", &format!("touch {}; false", ran.display())]);
+                reopen(d, "f", style).unwrap();
+                assert!(!ran.exists(), "{}: Re-open ran the repository's merge driver", style.name());
+                assert_eq!(String::from_utf8_lossy(&fs::read(d.join("f")).unwrap()), String::from_utf8_lossy(&expected), "{}", style.name());
+                assert_eq!(list(d).unwrap().len(), 1);
+            }
+        }
+        let dir = marked_conflict();
+        fs::write(dir.path().join(".git/info/attributes"), "* merge=evil\n").unwrap();
+        git(dir.path(), &["config", "merge.evil.driver", &format!("touch {}; false", ran.display())]);
+        try_git(dir.path(), &["checkout", "--conflict=merge", "--", "f"]);
+        assert!(ran.exists(), "git itself runs the driver");
+    }
+
+    #[test]
+    fn a_state_file_revision_is_never_a_git_option() {
+        let dir = text_conflict();
+        let d = dir.path();
+        assert!(!try_git(d, &["merge", "topic"]));
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("written");
+        let injected = format!("--output={}", target.display());
+        fs::write(d.join(".git/MERGE_HEAD"), format!("{injected}\n")).unwrap();
+        fs::write(d.join(".git/MERGE_MSG"), "not git's message\n").unwrap();
+        assert_eq!(in_progress(d).unwrap().unwrap().theirs, injected);
+        assert!(!target.exists(), "git log took the state file's text as an option");
     }
 
     // APFS refuses non-UTF-8 file names (EILSEQ), so the fixture can't exist on macOS.

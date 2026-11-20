@@ -341,7 +341,8 @@ fn run_shell_formatter(doc: &Document, organize: bool, project: Option<&Path>, s
 }
 
 /// The formatter a Python file's project configures, found in the project's configured Python environment (else, with
-/// none configured, the project's `.venv`/`venv`), else on `path`, with the root it was looked up under.
+/// none configured, the project's `.venv`/`venv`) when the user trusts the opened folder holding it, else on `path`,
+/// with the root it was looked up under.
 pub(crate) fn python_formatter(file: &Path, project: Option<&Path>, settings: &semantics::provider::Settings, path: Option<&std::ffi::OsStr>) -> Option<crate::preferences::Formatter> {
     let workspace = semantics::provider::python_root(file, project)?;
     let root = project.filter(|p| file.starts_with(p)).unwrap_or(&workspace);
@@ -349,7 +350,10 @@ pub(crate) fn python_formatter(file: &Path, project: Option<&Path>, settings: &s
     use crate::preferences::Tools;
     let configured = semantics::python::configured(&workspace, &settings.initialization(pyright, Some(&workspace)));
     let folder = configured.as_ref().ok().and_then(|c| c.as_ref()?.tools());
+    let trusted = settings.trusted_root(project).is_some_and(|t| workspace.starts_with(t));
     let tools = match (&configured, &folder) {
+        // The project's own tools are its programs.
+        _ if !trusted => Tools::PathOnly,
         (Ok(Some(_)), Some(folder)) => Tools::Environment(folder),
         (Ok(None), _) => Tools::Project,
         // A configured environment that is missing: never another project environment's tool, only PATH.
@@ -371,7 +375,8 @@ fn run_python_formatter(file: &Path, text: &str, organize: bool, project: Option
     };
     let configured = formatter.config.as_ref().map_or_else(|| "its defaults".into(), |c| c.display().to_string());
     let Some(executable) = formatter.executable else {
-        return ToolResult::Unavailable(format!("{} is configured by {configured} but was not found in the project's Python environment or on PATH; Lenz never installs formatters", formatter.tool));
+        let untrusted = if settings.trusted_root(project).is_none() { " (the project's own environment is searched only in an opened folder you trust: Trust Project Tools in This Folder)" } else { "" };
+        return ToolResult::Unavailable(format!("{} is configured by {configured} but was not found in the project's Python environment or on PATH{untrusted}; Lenz never installs formatters", formatter.tool));
     };
     let cwd = file.parent().unwrap_or(Path::new("/"));
     match semantics::runtime::run_with_input(&executable, &args, text, cwd, TOOL_TIMEOUT) {

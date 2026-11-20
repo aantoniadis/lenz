@@ -20,7 +20,13 @@ class PackageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / 'packaging').mkdir()
-        shutil.copyfile(Path(__file__).resolve().parents[1] / 'packaging/package.sh', self.root / 'packaging/package.sh')
+        # The macOS default build folder is in the shared /tmp: the copy uses one in this test's folder instead, so no
+        # test creates, checks or plants anything at the real one.
+        script = (Path(__file__).resolve().parents[1] / 'packaging/package.sh').read_text()
+        self.assertEqual(script.count('/tmp/lenz-dist'), 1)
+        (self.root / 'shared-tmp').mkdir()
+        self.dist = self.root / 'shared-tmp/lenz-dist'
+        (self.root / 'packaging/package.sh').write_text(script.replace('/tmp/lenz-dist', str(self.dist)))
         for name in ['README.md', 'LICENSE-MIT', 'LICENSE-THEMES', 'crates/engine/LICENSE', 'crates/engine/NOTICE',
                      'packaging/lenz.desktop', 'packaging/lenz-diff.desktop', 'assets/lenz-icon.png', 'assets/lenz.icns']:
             path = self.root / name
@@ -156,9 +162,39 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
             result = self.package('0.2.0')
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads((self.root / 'flags.json').read_text())['CARGO_TARGET_DIR']
-        self.assertEqual(target_dir('aarch64-apple-darwin', None), '/tmp/lenz-dist')
+        self.assertEqual(target_dir('aarch64-apple-darwin', None), str(self.dist))
+        self.assertEqual(self.dist.lstat().st_mode & 0o777, 0o700)
+        self.dist.chmod(0o755)  # the builder's own folder from an earlier run stays usable
+        self.assertEqual(target_dir('aarch64-apple-darwin', None), str(self.dist))
         self.assertEqual(target_dir('aarch64-apple-darwin', '/elsewhere'), '/elsewhere')
         self.assertIsNone(target_dir('x86_64-test-linux-gnu', None))
+
+    def test_macos_refuses_a_shared_build_folder_others_could_change(self):
+        self.fake_rustc('aarch64-apple-darwin')
+        self.env.pop('CARGO_TARGET_DIR')
+        script = self.root / 'packaging/package.sh'
+        def refused():
+            (self.root / 'calls.json').unlink(missing_ok=True)
+            result = self.package('0.2.0')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('must be your own folder', result.stderr)
+            self.assertFalse((self.root / 'calls.json').exists(), 'no build ran')
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir(mode=0o700)
+        self.dist.symlink_to(elsewhere)
+        refused()
+        self.dist.unlink()
+        for mode in (0o777, 0o770, 0o1777):
+            self.dist.mkdir(exist_ok=True)
+            self.dist.chmod(mode)
+            refused()
+        self.dist.rmdir()
+        self.dist.write_text('a file')
+        refused()
+        if os.getuid() != 0:
+            # Another account's folder: root's /usr stands in for it, and is only looked at.
+            script.write_text(script.read_text().replace(str(self.dist), '/usr'))
+            refused()
 
     def test_missing_artifact_does_not_package_stale_binary(self):
         self.env['LENZ_TEST_SKIP_ARTIFACT'] = '1'

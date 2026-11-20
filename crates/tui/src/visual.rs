@@ -128,10 +128,13 @@ impl Visual {
                 )
             }));
         }
+        // an SVG that cannot be drawn shows its text, with the reason among the document's notes
+        let text_shown = doc.placeholder_kind().is_none();
         self.start_syntax(doc, &token);
         if let Some(Some(image)) = prepared {
             match image {
                 Ok(image) => self.image = Some(image),
+                Err(_) if text_shown => {}
                 Err(error) => self.notice = Some(error),
             }
         }
@@ -218,7 +221,12 @@ impl Visual {
         }
         changed | self.inspection.poll()
     }
+    /// The rendering on screen: none while an SVG shows its Source.
     pub fn image(&self) -> Option<&ImageDoc> {
+        self.image.as_deref().filter(|d| !(d.source && self.state.mode() == Mode::Source))
+    }
+    /// The comparison's rendering, also while its Source is shown: what the image modes act on.
+    pub fn rendering(&self) -> Option<&ImageDoc> {
         self.image.as_deref()
     }
     pub fn image_state(&self) -> &ImageState {
@@ -313,7 +321,7 @@ impl Visual {
         image_viewport_ratio(&self.state, area,self.pane_ratio.unwrap_or(0.5))
     }
     pub fn image_key(&mut self, key: KeyEvent, area: Rect) -> bool {
-        if self.image.is_none() {
+        if self.image().is_none() {
             return false;
         }
         let Some(command) = image_command(key) else {
@@ -327,14 +335,14 @@ impl Visual {
         let viewport = self.viewport(area);
         let moved = self.state.execute(doc, command, viewport);
         if !moved {
-            self.notice = Some("No changed regions".into());
+            self.notice = Some(if matches!(command, ImageCommand::SetMode(Mode::Source)) { "Only an SVG has source text" } else { "No changed regions" }.into());
         } else {
             self.notice = None;
         }
         moved
     }
     pub fn draw_image(&self, buf: &mut Buffer, area: Rect,palette:&lenz::theme::Palette) {
-        if let Some(doc) = &self.image {
+        if let Some(doc) = self.image() {
             draw_image_ratio(palette,doc, &self.state, buf, area,self.pane_ratio.unwrap_or(0.5));
         }
     }
@@ -521,7 +529,8 @@ fn draw_image_ratio(palette:&lenz::theme::Palette,doc:&ImageDoc,state:&ImageStat
             Rect::new(area.x, area.y + 3, area.width, 1),
             &format!(
                 "{}{}",
-                if doc.diff.changed == 0 {
+                // pixels alone never make a comparison identical: an SVG's script or text draws none
+                if doc.diff.changed == 0 && doc.same_bytes {
                     "Identical · "
                 } else {
                     ""
@@ -564,7 +573,7 @@ fn draw_image_ratio(palette:&lenz::theme::Palette,doc:&ImageDoc,state:&ImageStat
             let iy = center.1 + (y as f32 * 2.0 + 0.5 - stage.height as f32) / zoom;
             let sample = |iy: f32| {
                 let inside = match state.mode() {
-                    Mode::TwoUp | Mode::Swipe => doc.sides[side].as_ref().is_some_and(|d| {
+                    Mode::TwoUp | Mode::Swipe | Mode::Source => doc.sides[side].as_ref().is_some_and(|d| {
                         ix >= 0.0 && iy >= 0.0 && ix < d.width as f32 && iy < d.height as f32
                     }),
                     Mode::Onion | Mode::Difference => {
@@ -575,7 +584,7 @@ fn draw_image_ratio(palette:&lenz::theme::Palette,doc:&ImageDoc,state:&ImageStat
                     return crate::chrome::color(palette.bg);
                 }
                 let pixel = match state.mode() {
-                    Mode::TwoUp | Mode::Swipe => side_pixel(doc, side, ix, iy),
+                    Mode::TwoUp | Mode::Swipe | Mode::Source => side_pixel(doc, side, ix, iy),
                     Mode::Onion => {
                         // The GUI blends the capped decode buffers directly; only
                         // the individual-side modes restore original dimensions.

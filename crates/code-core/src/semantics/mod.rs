@@ -904,7 +904,10 @@ impl Semantics {
             };
             let session = match self.server(q, &root) {
                 Some(s) => s.session,
-                None => self.queue(Key { provider: q, root, launch: self.settings.launch(&PROVIDERS[q]) }, doc.source().to_owned()),
+                None => {
+                    let launch = self.settings.launch_in(&PROVIDERS[q], browse, &root);
+                    self.queue(Key { provider: q, root, launch }, doc.source().to_owned())
+                }
             };
             wanted.entry(session).or_default().insert(doc.source().to_owned(), doc.clone());
         }
@@ -1454,6 +1457,22 @@ impl Semantics {
         }
         s.stop();
         true
+    }
+
+    /// Trust (or stop trusting) the project tools of browsing root `browse`, remembered across restarts: its servers
+    /// stop, and every workspace's server is chosen again (typescript-go depends on it). Returns the settings to save.
+    pub fn set_trusted(&mut self, browse: PathBuf, trusted: bool) -> Settings {
+        self.reload();
+        if trusted { self.settings.trusted.insert(browse.clone()); } else { self.settings.trusted.remove(&browse); }
+        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(|s| s.key.root.starts_with(&browse));
+        self.servers = keep;
+        let servers = &self.servers;
+        self.queued.retain(|q| servers.iter().any(|s| s.session == *q));
+        self.waiting = None;
+        self.roots.clear();
+        self.invalidate_root_lookups();
+        stop.into_iter().for_each(Server::stop);
+        self.settings.clone()
     }
 
     /// Turn `provider` off (or on again) for browsing root `browse`, remembered across restarts. Turning it off
@@ -2438,17 +2457,20 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
         let mut args: Vec<String> = provider.fixed_args.iter().map(|a| a.to_string()).chain(key.launch.args.iter().cloned()).collect();
         let mut bundled_version = None;
         let fallback = provider.bundled.filter(|_| key.launch.executable == Path::new(provider.executable)).and_then(|s| provider::bundled_server(&provider::VSCODE_EXTENSIONS, s));
-        // Its own lookup for this workspace (typescript-go: the project's tsc) when the settings name none.
+        // Its own lookup for this workspace (typescript-go: the project's tsc, in a trusted folder) when the settings
+        // name none.
         let locate = provider.locate.filter(|_| key.launch.executable == Path::new(provider.executable));
         let found = match locate {
             // Its own lookup decides (it searches PATH too, for a version it can run).
-            Some(locate) => locate(&key.root, &key.launch),
+            Some(locate) => match locate(&key.root, &key.launch) {
+                Ok(found) => Some(found),
+                Err(why) => {
+                    send(Event::Detected { session, version: Err(why) });
+                    return;
+                }
+            },
             None => provider::find_executable(&key.launch.executable, key.launch.path()),
         };
-        if locate.is_some() && found.is_none() {
-            send(Event::Detected { session, version: Err(format!("no `{}` it can run was found in the project's node_modules/.bin or on PATH", provider.executable)) });
-            return;
-        }
         let found = found.or_else(|| {
             let (script, version) = fallback.clone()?;
             let node = provider::find_executable(Path::new("node"), key.launch.path())?;
@@ -2491,7 +2513,7 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
         // The project environment it would analyse with: a configured one that is missing stops the launch, since
         // the server would otherwise use another without saying so.
         if let Some(environment) = provider.environment {
-            match environment(&key.root, &options, key.launch.path()) {
+            match environment(&key.root, &options, key.launch.path(), key.launch.trusted.as_deref()) {
                 Ok(line) => if !send(Event::Environment { session, line: Ok(lenz_content::display::expand_tabs(&line).0) }) { return; },
                 Err(reason) => {
                     let reason = lenz_content::display::expand_tabs(&reason).0;
@@ -2902,7 +2924,7 @@ mod tests {
         for stopped_first in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let mut semantics = Semantics::new(dir.path().join("providers.json"), dir.path().join("cache"), IDLE, Arc::new(std::time::Instant::now));
-            semantics.queue(Key { provider: 0, root: dir.path().to_owned(), launch: Launch { executable: "unused".into(), args: vec![], env: vec![] } }, dir.path().join("file.rs"));
+            semantics.queue(Key { provider: 0, root: dir.path().to_owned(), launch: Launch { executable: "unused".into(), args: vec![], env: vec![], trusted: None } }, dir.path().join("file.rs"));
             let process = semantics.servers[0].process.clone();
             let mut command = Command::new("sleep"); command.arg("30").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -2923,7 +2945,7 @@ mod tests {
         let mut semantics = Semantics::new(dir.path().join("providers.json"), dir.path().join("cache"), IDLE, Arc::new(std::time::Instant::now));
         let root = dir.path().to_path_buf();
         let file = root.join("App space λ.java");
-        semantics.queue(Key { provider: 0, root, launch: Launch { executable: "/nonexistent".into(), args: vec![], env: vec![] } }, file.clone());
+        semantics.queue(Key { provider: 0, root, launch: Launch { executable: "/nonexistent".into(), args: vec![], env: vec![], trusted: None } }, file.clone());
         semantics.servers[0].status = Status::Ready;
         semantics.queued.clear();
         let session = semantics.servers[0].session;
@@ -2952,7 +2974,7 @@ mod tests {
         let mut semantics=Semantics::new(dir.path().join("providers.json"),dir.path().join("cache"),IDLE,Arc::new(std::time::Instant::now));
         let original=Document::decode("/project/diagnostics.rb".into(),1,b"bad_name\n");
         for provider in 0..2 {
-            semantics.queue(Key{provider,root:"/project".into(),launch:Launch{executable:"/nonexistent".into(),args:vec![],env:vec![]}},original.source().to_path_buf());
+            semantics.queue(Key{provider,root:"/project".into(),launch:Launch{executable:"/nonexistent".into(),args:vec![],env:vec![],trusted:None}},original.source().to_path_buf());
             semantics.servers[provider].status=Status::Ready;
         }
         for version in 1..=128 {
@@ -2973,7 +2995,7 @@ mod tests {
     fn closing_diagnostic_sources_releases_the_cached_merged_publication() {
         let dir=tempfile::tempdir().unwrap();let mut semantics=Semantics::new(dir.path().join("providers.json"),dir.path().join("cache"),IDLE,Arc::new(std::time::Instant::now));
         let doc=Arc::new(Document::decode("/project/diagnostics.rb".into(),1,b"bad_name\n"));
-        for provider in 0..2 { semantics.queue(Key{provider,root:"/project".into(),launch:Launch{executable:"/nonexistent".into(),args:vec![],env:vec![]}},doc.source().to_path_buf());let server=&mut semantics.servers[provider];server.status=Status::Ready;server.open.insert(doc.source().to_owned(),doc.clone());server.diagnostics.insert(doc.source().to_owned(),Arc::new(diagnostics::FileDiagnostics::new(&doc,vec![]))); }
+        for provider in 0..2 { semantics.queue(Key{provider,root:"/project".into(),launch:Launch{executable:"/nonexistent".into(),args:vec![],env:vec![],trusted:None}},doc.source().to_path_buf());let server=&mut semantics.servers[provider];server.status=Status::Ready;server.open.insert(doc.source().to_owned(),doc.clone());server.diagnostics.insert(doc.source().to_owned(),Arc::new(diagnostics::FileDiagnostics::new(&doc,vec![]))); }
         semantics.queued.clear();
         let published=semantics.diagnostics(doc.source()).unwrap();let observed=Arc::downgrade(&published);drop(published);
         let (tx,_rx)=async_channel::bounded(32);semantics.sync(&[],&[],&[],None,&mut|_,_,_,_,_|panic!("no documents to resolve"),&tx);
@@ -2986,7 +3008,7 @@ mod tests {
         let mut semantics=Semantics::new(dir.path().join("providers.json"),dir.path().join("cache"),IDLE,Arc::new(std::time::Instant::now));
         let old=Arc::new(Document::decode("/project/diagnostics.rb".into(),1,b"bad_name\n"));
         let new=Arc::new(Document::from_snapshot_parts(old.source_meta().clone(),2,old.text().clone()));
-        let session=semantics.queue(Key{provider:0,root:"/project".into(),launch:Launch{executable:"/nonexistent".into(),args:vec![],env:vec![]}},old.source().to_path_buf());
+        let session=semantics.queue(Key{provider:0,root:"/project".into(),launch:Launch{executable:"/nonexistent".into(),args:vec![],env:vec![],trusted:None}},old.source().to_path_buf());
         let server=&mut semantics.servers[0];server.status=Status::Ready;server.written.insert(old.source().to_owned(),old.clone());
         server.flights.insert(1,TextFlight{path:new.source().to_owned(),document:new.clone(),epoch:1});
         semantics.queued.clear();
@@ -3031,7 +3053,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut semantics = Semantics::new(dir.path().join("providers.json"), dir.path().join("cache"), IDLE, Arc::new(std::time::Instant::now));
         let doc = Arc::new(Document::decode(PathBuf::from("/project/b.rs"), 1, b"fn target() {}\n"));
-        let session = semantics.queue(Key { provider: 0, root: "/project".into(), launch: Launch { executable: "/nonexistent".into(), args: Vec::new(), env: Vec::new() } }, doc.source().to_path_buf());
+        let session = semantics.queue(Key { provider: 0, root: "/project".into(), launch: Launch { executable: "/nonexistent".into(), args: Vec::new(), env: Vec::new(), trusted: None } }, doc.source().to_path_buf());
         // the fixture is a running server: not launched by a later event, whose failed `/nonexistent` would close its
         // input mid-test (a race that load can lose)
         semantics.queued.clear();

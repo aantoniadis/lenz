@@ -551,13 +551,23 @@ pub fn read(file: &Path, root: &Path) -> Result<Places, ReadError> {
     Ok(p)
 }
 
-/// Best effort, atomically: a failed save loses state, never a project file.
+/// Folders `dir` needs, created private (0700); existing ones keep their mode.
+fn private_dirs(dir: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(dir)
+}
+
+/// Best effort, atomically: a failed save loses state, never a project file. The file is private (0600): places
+/// keep the text of lines the user visited, and a save never widens a file the user restricted.
 pub fn write_atomic(file: &Path, bytes: &[u8]) {
     use std::sync::atomic::{AtomicU64, Ordering};
     let Some(dir) = file.parent() else { return };
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let temp = file.with_extension(format!("tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    let ok = std::fs::create_dir_all(dir).is_ok() && std::fs::write(&temp, bytes).is_ok() && std::fs::rename(&temp, file).is_ok();
+    let mut options = std::fs::OpenOptions::new();
+    std::os::unix::fs::OpenOptionsExt::mode(options.write(true).create_new(true), 0o600);
+    let ok = private_dirs(dir).is_ok()
+        && options.open(&temp).and_then(|mut f| std::io::Write::write_all(&mut f, bytes)).is_ok()
+        && std::fs::rename(&temp, file).is_ok();
     if !ok {
         let _ = std::fs::remove_file(&temp);
     }
@@ -663,8 +673,13 @@ impl Saver {
 /// The save becomes the base. Returns the places written when they differ from the save's. Nothing is written when
 /// the file cannot be read (another version's, or broken).
 fn write_merged(save: &Save, base: &mut (PathBuf, Arc<Places>)) -> Option<Places> {
-    let _ = std::fs::create_dir_all(save.file.parent()?);
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(save.file.with_extension("json.lock"));
+    let dir = save.file.parent()?;
+    let _ = private_dirs(dir);
+    // Lenz's own folder: an older reader's 0755 one would keep its readable places files of other projects readable.
+    let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let mut options = std::fs::OpenOptions::new();
+    std::os::unix::fs::OpenOptionsExt::mode(options.create(true).truncate(false).write(true), 0o600);
+    let lock = options.open(save.file.with_extension("json.lock"));
     // ponytail: advisory and best effort; where locks are unsupported, or another window holds one past LOCK_WAIT
     // (a reader stopped or hung while saving), two windows' saves can still interleave.
     if let Ok(l) = &lock {
@@ -964,6 +979,30 @@ mod tests {
         std::os::unix::fs::symlink(&two, &link).unwrap();
         let read_back = read(&file, &one).unwrap();
         assert_eq!(read_back.recent_files(), &[one.join("x.rs")], "the file's name is still the folder's");
+    }
+
+    #[test]
+    fn places_files_and_their_new_folders_are_private_and_a_save_never_widens_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let file = dir.path().join("lenz-code/projects/x.json");
+        write_atomic(&file, b"{}");
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!((mode(&dir.path().join("lenz-code")), mode(file.parent().unwrap())), (0o700, 0o700));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&file, b"{}");
+        assert_eq!(mode(&file), 0o600, "an existing file is replaced by a private one");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_atomic(&dir.path().join("y.json"), b"{}");
+        assert_eq!(mode(dir.path()), 0o755, "an existing folder keeps its mode");
+        // An older reader's projects folder becomes private on a save of places, with all the files in it.
+        let projects = dir.path().join("projects");
+        std::fs::create_dir(&projects).unwrap();
+        std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let save = Save { file: projects.join("p.json"), root: PathBuf::from("/p"), generation: 1, seq: 1, places: Arc::default() };
+        write_merged(&save, &mut Default::default());
+        assert_eq!((mode(&projects), mode(&save.file)), (0o700, 0o600));
     }
 
     #[test]

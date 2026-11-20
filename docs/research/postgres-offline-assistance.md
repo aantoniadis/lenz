@@ -41,6 +41,8 @@ The final post-merge release process completed **1,353,858 deterministic workloa
 
 Sampled stress RSS stayed between **8.41 and 8.52 MiB**; the final-quarter median was 8.51 MiB. The sampler retains one status record per second, so its allocations are included. A separately retained first run (`first/`) produced the same deterministic outcomes, zero network/provider-child syscalls, and a similarly bounded short-run RSS range. Large supplied catalogs and long-running product workloads were not measured.
 
+Since 2026-11-20 each syntax check runs the parser on its own thread with a 256 MiB stack, because libpg_query's own depth check is inert and deep expressions within the 256 KiB bound overflowed a worker stack. The native syntax check median is now about 0.03 ms and guarded formatting about 0.1 ms; see the [optimization notebook](../optimization-notebook.md#postgresql-parser-on-its-own-stack--2026-11-20).
+
 Build with `CARGO_BUILD_JOBS=4` and an isolated `CARGO_TARGET_DIR` for each worktree. Concurrent worktrees must not share Cargo build outputs; source/artifact collisions invalidate those measurements:
 
 ```sh

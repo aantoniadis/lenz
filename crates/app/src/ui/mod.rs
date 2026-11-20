@@ -112,6 +112,16 @@ impl Doc {
         let prepared=crate::document::PreparedDocument::load(set,index,lp,rp,force)?;
         Ok(Self{text:prepared.text,image:prepared.image.and_then(Result::ok).map(|core|Arc::new(ImageDoc::from_core(core)))})
     }
+
+    /// Both Sides hold the same content: pixels alone never make an image comparison identical, nor empty text
+    /// in place of binary or unread Sides.
+    pub(super) fn content_identical(&self) -> bool {
+        match &self.placeholder {
+            Some(Placeholder::Binary { differ, .. }) => !differ,
+            Some(Placeholder::Large { .. } | Placeholder::Unreadable(_)) => false,
+            None => self.text_left == self.text_right && self.image.as_ref().is_none_or(|i| i.same_bytes),
+        }
+    }
 }
 
 /// Today's metrics at a 13 px font; everything that holds text scales with the configured size.
@@ -1611,7 +1621,8 @@ impl Viewer {
     /// Diff in the background: the lines, then the shown blocks' Inline Changes. Past `DIFF_PATIENCE` it gives
     /// up for this file and options, showing the text alone under a banner; a late result is dropped.
     fn diff(&mut self, doc: Arc<Doc>, place: Place, cx: &mut Context<Self>) {
-        if doc.placeholder.is_some() || doc.image.is_some() {
+        // an SVG's source is diffed for its Source mode; a raster image has no text
+        if doc.placeholder.is_some() || doc.image.as_ref().is_some_and(|i| !i.source) {
             self.comparison.diffed = self.comparison.generation;
             return;
         }
@@ -3708,7 +3719,7 @@ impl Render for Viewer {
         let nothing = self.nothing.clone();
         let (picker_w, log_h) = (self.picker_w(), self.log_h());
         let comparison = self.set.comparisons.get(self.comparison.current);
-        let identical = loaded.is_some_and(|l| l.doc.text_left == l.doc.text_right);
+        let identical = loaded.is_some_and(|l| l.doc.content_identical());
         let notice = comparison.and_then(|comparison|navigator::notice(&comparison.status, identical));
         // a Merge View has notices of its own; the 2-way Comparison underneath isn't shown
         let merging = self.merge_notices();

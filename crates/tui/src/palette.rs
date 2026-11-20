@@ -14,7 +14,7 @@ impl App {
     pub(crate) fn scope(&self) -> Scope {
         let markdown = self.session.disabled(lenz::commands::Command::SetPresentation(lenz::markdown::PresentationMode::Rendered)) != Some("Not a Markdown comparison");
         Scope { surface: Surface::Comparison, sticky: self.visual.sticky, unified: self.session.view().unified(), repository: self.repository.is_some(), focused: self.layout.focused(self.repository.as_ref().map(|r| &r.core)), pr_tab: self.repository.as_ref().and_then(|r| r.core.pr.as_ref()).and_then(|p| p.details()).map(|d| d.tab), pr: self.repository.as_ref().is_some_and(|r| r.core.pr.is_some()),
-                image: self.visual.image().is_some(), markdown, options: self.session.options(), scroll: self.session.view().mode(),
+                image: self.visual.image().is_some(), image_source: self.visual.rendering().is_some_and(|d| d.source), markdown, options: self.session.options(), scroll: self.session.view().mode(),
                 presentation: self.session.markdown_mode(), context_hidden: self.session.context_hidden(), blame: self.blame[self.focus as usize],
                 image_mode: self.visual.image_state().mode(), markdown_layout: self.session.markdown_layout(), find: self.find_open().then(|| self.session.find_options()) }
     }
@@ -176,7 +176,7 @@ impl Availability for App {
                 let why = if file == lenz::file_actions::FileAction::UndoLenz { self.session.markdown_edit_disabled() } else { None };
                 why.or_else(|| self.file_disabled(file, self.session.current())).map(Cow::Borrowed)
             }
-            Action::Image(index) => lenz::image_session::image_commands().get(index).zip(self.visual.image()).and_then(|(e, doc)| e.disabled(doc, self.visual.image_state())).map(Cow::Borrowed),
+            Action::Image(index) => lenz::image_session::image_commands().get(index).zip(self.visual.rendering()).and_then(|(e, doc)| e.disabled(doc, self.visual.image_state())).map(Cow::Borrowed),
             Action::Repository(RepoAction::Refresh | RepoAction::Branches | RepoAction::NewBranch | RepoAction::CheckoutRevision) => None,
             Action::Repository(RepoAction::Filter) => None,
             Action::Repository(action @ (RepoAction::StagedChanges | RepoAction::CopyUrl | RepoAction::OpenUrl | RepoAction::LocalChanges

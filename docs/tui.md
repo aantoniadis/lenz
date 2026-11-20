@@ -37,7 +37,10 @@ would change other files, create or delete files, or run a server command are li
 Undo step, and the project's format-on-save formats before Save writes; see the
 [terminal editor guide](code/tui.md) for what is refused and when Save writes nothing. Python files run the project's
 configured ruff or black instead (Pyright does not format), in both adapters alike; Server Details names the Python
-environment Pyright uses ([Pyright](code/providers.md#pyright-python)).
+environment Pyright uses ([Pyright](code/providers.md#pyright-python)). A project's own programs (typescript-go's
+`node_modules/.bin/tsc`, a configured Python environment's interpreter and formatters) run only in an opened folder you
+trust with **Trust Project Tools in This Folder**, from the same Language Servers menu in both adapters
+([project tools](code/providers.md#project-tools-and-folder-trust)).
 
 The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
 line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.
@@ -74,10 +77,11 @@ other files are not changed. There is no default shortcut; the menus are the rou
 
 **Delete** while the file tree is focused opens the same confirmation as **Delete in Explorer…**.
 It moves the highlighted file or folder to the freedesktop trash of its file system (the home
-trash, or the mount's own `.Trash` folder), after a confirmation that says what goes and how many open tabs close;
-**Restore Last Deleted Entry** puts this session's latest deletion back without replacing anything (the desktop's trash
-can restore it too). **Delete Permanently in Explorer…** is a separate command and confirmation. Where no trash can be
-used (another platform, a file system without one) Delete says so and removes nothing. A document with unsaved changes,
+trash, or the mount's own `.Trash` folder), after a confirmation that says what goes and how many open tabs close.
+A trash folder another user owns or may change is never used. **Restore Last Deleted Entry** puts this session's
+latest deletion back without replacing anything, and only the entry it moved, never something put in its place in the
+trash (the desktop's trash can restore it too). **Delete Permanently in Explorer…** is a separate command and
+confirmation. Where no trash can be used (another platform, a file system without one) Delete says so and removes nothing. A document with unsaved changes,
 a running or unconfirmed save, or an undecided recovered draft refuses both, so unsaved work is never deleted with its
 file, and deleted work is not offered back by draft recovery.
 
@@ -157,7 +161,7 @@ Writes use the same snapshots, encoding and line-ending preservation, read-only 
 
 ### Images
 
-Images draw as colored half-block cells. `m` cycles the modes; `0` fits and `1` shows 1:1; `+`/`-` zoom; arrows pan; `,` / `.` change the opacity or Swipe split; `n`/`p` step through changed regions. Every image command, including copying paths and opening the original externally, is also in the palette.
+Images draw as colored half-block cells. An SVG adds **Source** to the header's modes: its line diff, with find, copy and the diff options, since a rendering shows no script, link or text; a click on another mode returns to the rendering. `m` cycles the modes; `0` fits and `1` shows 1:1; `+`/`-` zoom; arrows pan; `,` / `.` change the opacity or Swipe split; `n`/`p` step through changed regions. Every image command, including copying paths and opening the original externally, is also in the palette.
 
 ### Archives
 
@@ -204,7 +208,7 @@ Selecting or refreshing a PR in the repository view shows a persistent **Loading
 
 Both frontends share the **Overview** (Branches, History, Files and the diff) and **Focus** (Files and the diff) through the shared layout. Focus hides Branches and History; Alt-2 and Alt-3 are refused there with their reason. A window without a repository has no Overview, and Alt-0 there says why. Enter or a double click on a file in Files enters Focus.
 
-- **Toolbar:** it starts with ☰, then **Focus** in the Overview or **Overview** in Focus, then ◀ ▶. Both views share **⚙** (Layout Split | Unified, whitespace, highlighting, scrolling, context, case, blame); Focus adds **≡ Unchanged** and **?**. A PR's **Conversation | Commits | Files changed** tabs sit in the middle and give way to the Markdown modes when the header is too narrow. The pane header carries **Source | Inline | Side by side** for Markdown and **2-up | Swipe | Onion skin | Difference** for images.
+- **Toolbar:** it starts with ☰, then **Focus** in the Overview or **Overview** in Focus, then ◀ ▶. Both views share **⚙** (Layout Split | Unified, whitespace, highlighting, scrolling, context, case, blame); Focus adds **≡ Unchanged** and **?**. A PR's **Conversation | Commits | Files changed** tabs sit in the middle and give way to the Markdown modes when the header is too narrow. The pane header carries **Source | Inline | Side by side** for Markdown and **2-up | Swipe | Onion skin | Difference** for images, plus **Source** for an SVG.
 - **Selection Title:** the name of what is compared (`main ~ feature/x`, `v0.1.0 (a1b2c3d)`) leads the diff title line and the History header. The terminal has no window title to carry it.
 - **Unified:** one full-width column (deleted rows, then inserted, unchanged once). Selection and copy work on the Side of the row under the pointer, one horizontal scroll covers both Sides, and editing is refused with "Switch to Split to edit". Images and the Preview keep their own layouts.
 - **Commit message:** in Focus, the file tree and diff sit above a full-width bottom panel showing the commit's subject, author, date, hash and body. A range lists its newest 200 commits, each opening on a click. The panel takes at most a third of the available height. **Commit** in the bottom bar or **Show / hide commit message** in the palette hides or restores the whole panel; clicking its first line also hides it. It stays available when Files is hidden. Down on the last file gives the panel the keyboard: Up/Down walk a range or scroll one message, Enter or Space opens the commit, Esc or moving past an end returns to Files (or the diff if Files is hidden), Ctrl-C copies the message. The GUI also selects text by dragging; the terminal leaves text selection to the emulator. Working tree, index and pull requests show none. Very small terminals omit the panel until there is room.
@@ -213,7 +217,7 @@ Both frontends share the **Overview** (Branches, History, Files and the diff) an
 
 ![The terminal Diff's Merge View with Ours, Result and Theirs panes](images/tui-merge.png)
 
-The Merge View's toolbar matches the GUI's: ☰, ↑ ↓ changes, ⇡ ⇣ unresolved conflicts, ↶ Undo, ↷ Redo, ⤓ Save, Done/Cancel and `⋯`. The Version Picker uses the same icons plus Mark resolved and its **Take ‹version›** buttons. The Conflict List adds **File actions ▾** and **Copy command ▾** (continuation and submodule commands). The GUI shows those buttons in the page rather than the toolbar.
+The Merge View's toolbar matches the GUI's: ☰, ↑ ↓ changes, ⇡ ⇣ unresolved conflicts, ↶ Undo, ↷ Redo, ⤓ Save, Done/Cancel and `⋯`. The Version Picker uses the same icons plus Mark resolved and its **Take ‹version›** buttons. The Conflict List adds **File actions ▾** and **Copy command ▾** (continuation and submodule commands; a submodule path is quoted for POSIX shells and fish, and one with control characters gets no command to copy). The GUI shows those buttons in the page rather than the toolbar.
 
 | Operation | Terminal control |
 | --- | --- |

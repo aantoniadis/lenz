@@ -60,12 +60,27 @@ impl PreparedDocument {
             } else { label }
         }
         let (image_left, image_right) = (image_name(&comparison.old_path, left), image_name(&comparison.path, right));
+        // An SVG is text to git: its source stays a comparison beside its rendering, as `git diff` shows it.
+        let svg = |side: &SideBytes, name: &Path| {
+            side.bytes.is_empty() || crate::images::detect_file(&name.to_string_lossy(), &side.bytes, side.binary) == Some(crate::images::Format::Svg)
+        };
+        let svg_text = !l.binary && !r.binary && svg(l, image_left) && svg(r, image_right);
         match crate::image_session::ImageDoc::read((&l.bytes, image_left, l.binary), (&r.bytes, image_right, r.binary)) {
-            Some(Ok(image)) => {
-                let mut text = TextDocument::new("", "", left, right);
+            Some(Ok(mut image)) => {
+                let mut text = if svg_text {
+                    let text = TextDocument::from_sides(set, index, left, right, sides);
+                    // its rendering is what opens: a move onto the source would leave that rendering stale
+                    TextDocument { writable: [Err("shown as an image"), Err("shown as an image")], ..text }
+                } else { TextDocument::new("", "", left, right) };
+                image.source = svg_text;
                 text.encodings = [image.info(Side::Left), image.info(Side::Right)];
-                text.notes = image.notes();
+                text.notes = image.notes().into_iter().chain(std::mem::take(&mut text.notes)).collect();
                 Ok(Self { text, image: Some(Ok(image)) })
+            }
+            Some(Err(error)) if svg_text => {
+                let mut text = TextDocument::from_sides(set, index, left, right, sides);
+                text.notes.push(format!("cannot show as an image: {error}"));
+                Ok(Self { text, image: Some(Err(error)) })
             }
             Some(Err(error)) => {
                 let sizes = [l.bytes.len() as u64, r.bytes.len() as u64];
@@ -164,7 +179,15 @@ impl TextDocument {
                 (Err(why), _) => Err(why),
                 _ if side.textconv => Err("shown through a textconv driver"),
                 (Ok(()), Source::File(path)) => match Snapshot::read(path, side.encoding.as_deref()) {
-                    Ok((snapshot, decoded)) if !decoded.lossy => return (decoded, Ok(snapshot)),
+                    // A repository comparison writes only inside its root, never through a working-tree folder link,
+                    // and Save checks that again.
+                    Ok((snapshot, decoded)) if !decoded.lossy => match set.git_root() {
+                        Some(root) => match snapshot.in_repository(root) {
+                            Ok(snapshot) => return (decoded, Ok(snapshot)),
+                            Err(_) => Err("reached through a symlink"),
+                        },
+                        None => return (decoded, Ok(snapshot)),
+                    },
                     Ok(_) => Err("not decodable without loss"),
                     Err(_) => Err("unreadable"),
                 },
@@ -181,6 +204,9 @@ impl TextDocument {
         doc.notes.extend(set.note(index).map(str::to_owned));
         if dl.lossy || dr.lossy {
             doc.notes.push(encoding::LOSSY_NOTICE.into());
+        }
+        if dl.hides_ascii || dr.hides_ascii {
+            doc.notes.push(encoding::HIDES_ASCII_NOTICE.into());
         }
         if l.textconv || r.textconv {
             doc.notes.push("shown through a textconv driver".into());
@@ -291,6 +317,73 @@ mod prepared_tests {
             assert_eq!(image.sides[1].as_ref().unwrap().pixels.get_pixel(0, 0).0, [0, 0, 255, 255]);
             assert!(prepared.text.placeholder_kind().is_none());
         }
+    }
+
+    #[test]
+    fn a_guessed_encoding_that_hides_ascii_is_a_comparison_note() {
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("old.sh"), d.path().join("new.sh"));
+        // "# 設定を表示" in Shift_JIS on both Sides, so their encodings agree and only the new note speaks
+        let comment = b"# \x90\xDD\x92\xE8\x82\xF0\x95\x5C\x8E\xA6\n";
+        std::fs::write(&left, [&comment[..], b"echo \"mode: safe\"\n"].concat()).unwrap();
+        std::fs::write(&right, [&comment[..], b"printf '%s\\n' 'echo X' \x83| sh\n"].concat()).unwrap();
+        let set = ChangeSet::load(&crate::changeset::Spec::Plain { left: left.clone(), right: right.clone() }, d.path()).unwrap();
+        let doc = PreparedDocument::load(&set, 0, &left, &right, false).unwrap().text;
+        assert_eq!(doc.encoding(Side::Right), Some("Shift_JIS"));
+        assert!(!doc.lines_on(Side::Right)[1].contains('|'));
+        assert_eq!(doc.notes(), [encoding::HIDES_ASCII_NOTICE]);
+    }
+
+    #[test]
+    fn a_working_tree_side_reached_through_a_folder_symlink_is_never_written() {
+        use crate::{edit_session::EditCommand, git::testing::{commit_all, git, try_git, write}, session::Session};
+        // outside the system temp directory, whose files are read-only for a move anyway
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        let d = dir.path();
+        git(d, &["init", "-q", "-b", "main"]);
+        write(d, "ln/target", "base\n");
+        write(d, "dir/plain.txt", "base\n");
+        commit_all(d, "base");
+        git(d, &["checkout", "-q", "-b", "other"]);
+        write(d, "ln/target", "theirs\n");
+        commit_all(d, "theirs");
+        git(d, &["checkout", "-q", "main"]);
+        write(d, "ln/target", "ATTACKER-HEAD\n");
+        commit_all(d, "ours");
+        assert!(!try_git(d, &["merge", "-q", "other"]));
+        write(d, "dir/plain.txt", "changed\n");
+        let outside = tempfile::tempdir_in(&root).unwrap();
+        for name in ["target", "plain.txt"] {
+            std::fs::write(outside.path().join(name), "victim line\n").unwrap();
+        }
+        std::fs::remove_dir_all(d.join("ln")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.join("ln")).unwrap();
+        let spec = crate::changeset::Spec::Git { cached: false, revs: vec![], paths: vec![], untracked: true };
+        let set = Arc::new(ChangeSet::load(&spec, d).unwrap());
+        let at = |path: &str| set.comparisons.iter().position(|c| c.path == path).unwrap();
+        // an unmerged path under a working-tree folder link is not the working-tree file
+        let linked = TextDocument::load(&set, at("ln/target"), Path::new("l"), Path::new("r"), false).unwrap();
+        assert!(matches!(set.comparisons[at("ln/target")].right, Source::Empty));
+        assert!(!linked.is_writable(Side::Right));
+        // a Side bound to the repository is checked again at Save: a folder swapped for a link after loading
+        let mut session = Session::from_set(set.clone(), spec, Default::default(), Default::default());
+        let settle = |session: &mut Session| {
+            let started = std::time::Instant::now();
+            while session.busy() { session.poll(); assert!(started.elapsed().as_secs() < 15); std::thread::yield_now(); }
+        };
+        settle(&mut session);
+        session.open_file(at("dir/plain.txt"));
+        settle(&mut session);
+        assert!(session.document().unwrap().is_writable(Side::Right), "an ordinary working-tree file is editable");
+        std::fs::rename(d.join("dir"), d.join("dir.moved")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.join("dir")).unwrap();
+        std::fs::write(outside.path().join("plain.txt"), "changed\n").unwrap();
+        session.edit(EditCommand::Apply { block: 0, onto: Side::Right });
+        session.edit(EditCommand::Save);
+        assert!(session.notice().is_some_and(|n| n.contains("symlink")), "{:?}", session.notice());
+        assert_eq!(std::fs::read_to_string(outside.path().join("plain.txt")).unwrap(), "changed\n");
+        assert_eq!(std::fs::read_to_string(outside.path().join("target")).unwrap(), "victim line\n");
     }
 
     #[test]

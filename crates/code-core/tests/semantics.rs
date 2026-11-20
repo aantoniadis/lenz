@@ -2608,7 +2608,7 @@ fn initialize_declares_call_hierarchy_support() {
 }
 
 /// A TypeScript 7 project (its TypeScript has no tsserver) is served by typescript-go, launched as the project's own
-/// `node_modules/.bin/tsc` with `--lsp --stdio`, and named so.
+/// `node_modules/.bin/tsc` with `--lsp --stdio` once the user trusts the opened folder, and named so.
 #[test]
 fn a_typescript_7_project_is_served_by_typescript_go_from_its_own_tsc() {
     let files = [("package.json", "{}\n"), ("node_modules/typescript/package.json", "{ \"name\": \"typescript\", \"version\": \"7.0.2\" }\n"), ("src/a.ts", "export const a = 1;\n"), ("src/lib/b.ts", "export const b = 2;\n")];
@@ -2618,6 +2618,9 @@ fn a_typescript_7_project_is_served_by_typescript_go_from_its_own_tsc() {
     std::fs::create_dir_all(tsc.parent().unwrap()).unwrap();
     std::fs::copy(f.root.parent().unwrap().join("fake-server"), &tsc).unwrap();
     f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| s.disabled(CommandId::UntrustProjectTools).is_none());
     f.open("src/a.ts");
     let view = f.s.state().provider().unwrap();
     assert_eq!((view.name, view.root.as_deref()), ("typescript-go", Some(f.root.as_path())));
@@ -2637,6 +2640,109 @@ fn a_typescript_7_project_is_served_by_typescript_go_from_its_own_tsc() {
     f.settle(|s| s.state().provider().is_some_and(|v| v.name == "typescript-go" && matches!(v.status, Status::Ready | Status::Indexing(_))));
     f.s.dispatch(Command::SetServerEnabled(false));
     f.settle(|s| s.state().servers().iter().all(|v| v.name != "typescript-go"));
+}
+
+/// A project's own `tsc` is the project's program. Opened alone, or in a folder that is not trusted, it never runs: its
+/// server says why and how to trust the folder. Trusting the folder runs it and is kept, privately, in providers.json
+/// outside the checkout; stopping trusting stops it. A `tsc` above the trusted folder is never searched for.
+#[test]
+fn a_project_tsc_runs_only_in_a_trusted_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let files = [("package.json", "{}\n"), ("node_modules/typescript/package.json", "{ \"name\": \"typescript\", \"version\": \"7.0.2\" }\n"), ("src/a.ts", "export const a = 1;\n"), ("app/package.json", "{}\n"), ("app/b.ts", "export const b = 2;\n")];
+    let settings = serde_json::json!({ "executable": null, "env": { "PATH": "/nonexistent" } });
+    let untrusted = |s: &Session| s.state().provider().is_some_and(|v| v.name == "typescript-go" && matches!(&v.status, Status::Missing(why) if why.contains("is the project's program")));
+    // The project's tsc leaves a marker, then serves as the fake.
+    let fixture = || {
+        let f = fixture_as("typescript-go", &[], &files, settings.clone(), std::sync::Arc::new(Instant::now));
+        let marker = f._dir.path().join("tsc-ran");
+        script(&f.root.join("node_modules/.bin/tsc"), &format!("#!/bin/sh\n: > '{}'\nexec '{}' \"$@\"\n", marker.display(), f._dir.path().join("fake-server").display()));
+        (f, marker)
+    };
+    // Opened alone (no folder): nothing to trust, and nothing runs.
+    let (mut f, marker) = fixture();
+    f.s.dispatch(Command::Open(f.root.join("src/a.ts")));
+    f.settle(untrusted);
+    assert_eq!(f.s.disabled(CommandId::TrustProjectTools), Some("No folder is open: open the project's folder to trust its tools"));
+    assert!(!marker.exists(), "an untrusted project's tsc ran");
+    // The folder open, not trusted: still nothing, and the command offers to trust it.
+    let (mut f, marker) = fixture();
+    let providers = f._dir.path().join("config/providers.json");
+    std::fs::set_permissions(&providers, std::fs::Permissions::from_mode(0o600)).unwrap();
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::Open(f.root.join("src/a.ts")));
+    f.settle(untrusted);
+    assert!(!marker.exists(), "an untrusted folder's tsc ran");
+    assert_eq!(f.s.disabled(CommandId::UntrustProjectTools), Some("This folder's project tools are not trusted"));
+    assert!(f.s.language_server_rows().iter().any(|(_, id)| *id == Some(CommandId::TrustProjectTools)));
+    // Trusted: its tsc serves, and the trust is saved privately.
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| ready(s) && s.disabled(CommandId::UntrustProjectTools).is_none());
+    assert!(marker.exists(), "the trusted folder's tsc did not run");
+    assert!(f.s.language_server_rows().iter().any(|(_, id)| *id == Some(CommandId::UntrustProjectTools)));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&providers).unwrap()).unwrap();
+    assert_eq!(saved["trusted"], serde_json::json!([f.root]));
+    assert_eq!(std::fs::metadata(&providers).unwrap().permissions().mode() & 0o777, 0o600, "providers.json stays private");
+    // Folder-level server commands keep it private too.
+    f.s.dispatch(Command::SetServerEnabled(false));
+    f.settle(|s| s.disabled(CommandId::EnableServer).is_none());
+    assert_eq!(std::fs::metadata(&providers).unwrap().permissions().mode() & 0o777, 0o600);
+    f.s.dispatch(Command::SetServerEnabled(true));
+    f.settle(|s| s.disabled(CommandId::DisableServer).is_none() && ready(s));
+    // Stopping trusting stops it; it does not start again.
+    std::fs::remove_file(&marker).unwrap();
+    f.s.dispatch(Command::SetProjectToolsTrusted(false));
+    f.settle(untrusted);
+    assert!(!marker.exists());
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&providers).unwrap()).unwrap().get("trusted"), None);
+    // A trusted folder inside the project: the project's tsc above it is not searched for.
+    let (mut f, marker) = fixture();
+    let app = f.root.join("app");
+    f.s.dispatch(Command::OpenRoot(app.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| s.disabled(CommandId::UntrustProjectTools).is_none());
+    f.s.dispatch(Command::Open(app.join("b.ts")));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Missing(_))));
+    assert!(!marker.exists(), "a tsc above the trusted folder ran");
+}
+
+/// A Python environment the project configures is the project's: without a recorded version, its interpreter is run
+/// for one only once the user trusts the opened folder; until then Server Details says the version is unknown and how
+/// to trust the folder.
+#[test]
+fn a_project_python_interpreter_runs_only_in_a_trusted_folder() {
+    let files = [("pyrightconfig.json", "{ \"venvPath\": \".\", \"venv\": \"env\" }"), ("env/lib/python3.12/site-packages/.keep", ""), ("app.py", "x = 1\n")];
+    let mut f = fixture_as("pyright", &[], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    let marker = f._dir.path().join("python-ran");
+    script(&f.root.join("env/bin/python"), &format!("#!/bin/sh\ntouch '{}'\necho 'Python 3.12.0'\n", marker.display()));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.open("app.py");
+    let environment = |s: &Session| s.state().provider().and_then(|v| v.environment).and_then(Result::ok).unwrap_or_default();
+    assert!(environment(&f.s).contains("Python version unknown") && environment(&f.s).contains("Trust Project Tools in This Folder"), "{}", environment(&f.s));
+    assert!(f.s.language_server_details().contains("Trust Project Tools in This Folder"));
+    assert!(!marker.exists(), "an untrusted project's interpreter ran");
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| ready(s) && environment(s).contains("Python 3.12.0"));
+    assert!(marker.exists());
+}
+
+/// The ruff of a project's environment is the project's program: in a folder that is not trusted, Format Document
+/// does not run it and says how to trust the folder.
+#[test]
+fn python_formatting_runs_the_projects_ruff_only_in_a_trusted_folder() {
+    let mut f = python_format_fixture("x  =  1\n");
+    f.s.dispatch(Command::SetProjectToolsTrusted(false));
+    f.settle(|s| s.disabled(CommandId::TrustProjectTools).is_none() && ready(s));
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Format Document:")));
+    assert!(!f.root.join("env/bin/ruff.args").exists(), "an untrusted project's ruff ran");
+    // A ruff on PATH may format instead; without one, the message says how to trust the folder.
+    if code_core::semantics::provider::find_executable(Path::new("ruff"), None).is_none() {
+        assert!(f.notice("Trust Project Tools in This Folder"), "{:?}", f.s.state().notices());
+        assert_eq!(current_text(f.s.state()), "x  =  1\n");
+    }
 }
 
 #[test]
@@ -4005,6 +4111,10 @@ fn python_format_fixture(text: &str) -> Fixture {
     let mut f = fixture_input("pyright", &[], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now), true);
     script(&f.root.join("env/bin/ruff"), FAKE_RUFF);
     f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    // The environment's ruff is the project's program: it runs only in a folder the user trusts.
+    f.s.dispatch(Command::SetProjectToolsTrusted(true));
+    f.settle(|s| s.disabled(CommandId::UntrustProjectTools).is_none());
     f.open("app.py");
     f
 }

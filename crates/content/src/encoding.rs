@@ -21,6 +21,8 @@ pub struct Decoded {
     pub had_bom: bool,
     /// Some bytes were undecodable and became U+FFFD.
     pub lossy: bool,
+    /// A guessed (not BOM- or label-chosen) encoding read ASCII punctuation bytes as parts of characters.
+    pub hides_ascii: bool,
 }
 
 /// Decodes one document. `declared` is a git `working-tree-encoding` label; unknown labels are ignored.
@@ -31,13 +33,17 @@ pub fn decode(bytes: &[u8], declared: Option<&str>) -> Decoded {
         Some(encoding) => encoding,
         // fast path: one validation pass, one copy
         None => match UTF_8.decode_without_bom_handling_and_without_replacement(bytes) {
-            Some(text) => return Decoded { text: text.into_owned(), encoding: "UTF-8", had_bom: false, lossy: false },
+            Some(text) => return Decoded { text: text.into_owned(), encoding: "UTF-8", had_bom: false, lossy: false, hides_ascii: false },
             None => guess(bytes),
         },
     };
+    let guessed = bom.is_none() && declared.is_none();
     // `decode` honours and strips a BOM, so a BOM beats the declared label
     let (text, encoding, lossy) = encoding.decode(bytes);
-    Decoded { text: text.into_owned(), encoding: encoding.name(), had_bom: bom.is_some(), lossy }
+    // A guessed Shift_JIS, Big5 or GBK reads ` | \ { } after a lead byte as a trail byte, where git and sh see ASCII.
+    let punctuation = |b: &[u8]| b.iter().filter(|b| b.is_ascii_punctuation()).count();
+    let hides_ascii = guessed && punctuation(text.as_bytes()) < punctuation(bytes);
+    Decoded { text: text.into_owned(), encoding: encoding.name(), had_bom: bom.is_some(), lossy, hides_ascii }
 }
 
 /// Guesses a legacy encoding from the first 64 KB (the whole file costs seconds).
@@ -71,6 +77,9 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 
 pub const LOSSY_NOTICE: &str = "undecodable bytes shown as �";
 
+/// The notice for a [`Decoded::hides_ascii`] document.
+pub const HIDES_ASCII_NOTICE: &str = "guessed encoding reads ASCII ` | \\ { } as parts of characters; git and shells see them";
+
 /// The file-level notice when two documents' encodings differ (a comparison's Sides).
 pub fn describe(a: &Decoded, b: &Decoded) -> Option<String> {
     let (a, b) = (a.label(), b.label());
@@ -96,7 +105,7 @@ mod tests {
     #[test]
     fn utf8_without_bom() {
         let d = decode("héllo\n".as_bytes(), None);
-        assert_eq!(d, Decoded { text: "héllo\n".into(), encoding: "UTF-8", had_bom: false, lossy: false });
+        assert_eq!(d, Decoded { text: "héllo\n".into(), encoding: "UTF-8", had_bom: false, lossy: false, hides_ascii: false });
         assert!(!d.shown_in_header());
     }
 
@@ -108,7 +117,7 @@ mod tests {
     #[test]
     fn utf8_bom_is_stripped() {
         let d = decode(b"\xEF\xBB\xBFabc", None);
-        assert_eq!(d, Decoded { text: "abc".into(), encoding: "UTF-8", had_bom: true, lossy: false });
+        assert_eq!(d, Decoded { text: "abc".into(), encoding: "UTF-8", had_bom: true, lossy: false, hides_ascii: false });
         assert_eq!(d.label(), "UTF-8 BOM");
         assert!(d.shown_in_header());
     }
@@ -116,9 +125,9 @@ mod tests {
     #[test]
     fn utf16_with_bom_decodes_as_text() {
         let le = decode(&utf16("añb\n", true), None);
-        assert_eq!(le, Decoded { text: "añb\n".into(), encoding: "UTF-16LE", had_bom: true, lossy: false });
+        assert_eq!(le, Decoded { text: "añb\n".into(), encoding: "UTF-16LE", had_bom: true, lossy: false, hides_ascii: false });
         let be = decode(&utf16("añb\n", false), None);
-        assert_eq!(be, Decoded { text: "añb\n".into(), encoding: "UTF-16BE", had_bom: true, lossy: false });
+        assert_eq!(be, Decoded { text: "añb\n".into(), encoding: "UTF-16BE", had_bom: true, lossy: false, hides_ascii: false });
     }
 
     #[test]
@@ -134,6 +143,19 @@ mod tests {
         let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(JAPANESE);
         let d = decode(&bytes, None);
         assert_eq!((d.text.as_str(), d.encoding, d.lossy), (JAPANESE, "Shift_JIS", false));
+    }
+
+    #[test]
+    fn a_guess_that_hides_ascii_says_so() {
+        let mut bytes = b"#!/bin/sh\n".to_vec();
+        bytes.extend_from_slice(&encoding_rs::SHIFT_JIS.encode("# 設定を表示\n").0);
+        bytes.extend_from_slice(b"echo \"mode: \x83`touch marker #\x83`\"\nprintf '%s\\n' 'echo X' \x83| sh\n");
+        let d = decode(&bytes, None);
+        assert_eq!((d.encoding, d.lossy, d.text.matches(['`', '|']).count(), d.hides_ascii), ("Shift_JIS", false, 0, true));
+        // a label chose the encoding, so the bytes mean what it says
+        assert!(!decode(&bytes, Some("Shift_JIS")).hides_ascii);
+        assert!(!decode(&encoding_rs::WINDOWS_1252.encode(FRENCH).0, None).hides_ascii);
+        assert!(!decode(b"plain `ascii` | text\n", None).hides_ascii);
     }
 
     #[test]

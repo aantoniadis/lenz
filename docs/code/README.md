@@ -616,8 +616,10 @@ against the base branch as it is now (your local `main` or `master`, else the re
 `origin/main` or `origin/master`; Lenz never fetches); **Show Changes Since Branch Start** against the point the current branch split from that base, so
 only what the branch changes, not the base's later updates; **Compare with Worktree…** lists the other worktrees and compares the two folders. A row's actions in Git
 Branches… add **Compare with Working Tree** (branches, tags and worktrees) and **Show Changes Since Branching from
-Here** (other branches). Folder comparisons inside a repository skip what git ignores (`target/`, `node_modules/`); submodules and nested
-repositories are compared by their own ignore rules.
+Here** (other branches). Folder comparisons inside a repository skip what the folders' `.gitignore` files or your own global
+excludes ignore (`target/`, `node_modules/`); submodules and nested repositories are compared by their own `.gitignore` files. A
+compared folder's `.git/info/exclude` and repository-local `core.excludesFile` hide nothing, since they are never compared, and a
+`.gitignore` that ignores itself is still listed.
 
 The gutter also marks the draft's own changes. Left of the line numbers, a line the draft modifies shows **M** in the
 modified-file blue and a line it adds shows **A** in the added-file green; a second cell shows **D** where the draft
@@ -721,8 +723,9 @@ back. It shares Find Files' icons, secondary paths and fuzzy name/path matching,
 heading. Recent Locations (Ctrl+Alt+E) lists where navigation went from and to, and where a file was left (a place
 within five lines of a listed one replaces it). In each list, typing filters, Enter or a click goes there (a history step), Delete
 removes the entry, and files that no longer exist show "missing". The reader keeps 50 recent files and 30 recent
-locations per folder and every bookmark, in `$XDG_STATE_HOME/lenz-code/projects/` (one file per folder, at most 4 MiB,
-saved a second after the last change and at exit); without a folder they last until the reader closes. Two windows
+locations per folder and every bookmark, in the private (0700) `$XDG_STATE_HOME/lenz-code/projects/` (one 0600
+file per folder, at most 4 MiB, saved a second after the last change and at exit); without a folder they last until
+the reader closes. Two windows
 on one folder merge their places when either saves; a window shows the other's changes after its own next save. A
 places file from another reader version is left as it is, and places are then not saved. An unreadable file is kept
 beside it as `.json.unreadable`.

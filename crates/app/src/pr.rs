@@ -241,7 +241,11 @@ impl Gh {
         let protocol = self.run(&["config", "get", "git_protocol", "--host", &repo.host])?;
         let slug = format!("{}/{}/{}", repo.host, repo.owner, repo.name);
         let urls: Urls = self.json(&["repo", "view", &slug, "--json", "url,sshUrl"])?;
-        Ok(if String::from_utf8_lossy(&protocol).trim() == "ssh" { urls.ssh_url } else { urls.url })
+        let url = if String::from_utf8_lossy(&protocol).trim() == "ssh" { urls.ssh_url } else { urls.url };
+        if !forge_url(&url) {
+            return Err(PrError::Gh(format!("unexpected repository URL {url:?}")));
+        }
+        Ok(url)
     }
 
     /// Has the PR moved past `fetched_head` (the head Lenz fetched)? One `gh pr view --json headRefOid`.
@@ -626,14 +630,25 @@ impl Fetched {
     }
 }
 
+/// A repository URL a forge may answer with: https, http (an Enterprise host without TLS), ssh or scp-style
+/// `user@host:path`. Never an option, a local path or a `<transport>::` remote helper: it becomes git's argument.
+fn forge_url(url: &str) -> bool {
+    let scp = !url.contains("://") && url.split_once(':').is_some_and(|(at, _)| at.contains('@') && !at.contains('/'));
+    !url.starts_with('-') && !url.contains("::")
+        && (["https://", "http://", "ssh://"].iter().any(|s| url.starts_with(s)) || scp)
+}
+
 /// Fetches PR `number` and its base branch from `url` into private refs. Only those two refs change: no
 /// branch, remote-tracking ref, FETCH_HEAD, tag or worktree. Call [`ensure_clone`] first.
 pub fn fetch(cwd: &Path, url: &str, number: u64, base_branch: &str) -> Result<Fetched, PrError> {
     let (head_ref, base_ref) = (format!("refs/lenz/pr/{number}/head"), format!("refs/lenz/pr/{number}/base"));
     let refspecs =
         [format!("+refs/pull/{number}/head:{head_ref}"), format!("+refs/heads/{base_branch}:{base_ref}")];
-    let mut args =
-        vec!["-c", "gc.auto=0", "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", url];
+    // The forge chose `url`: after `--end-of-options` it is only ever the repository, never an option.
+    let mut args = vec![
+        "-c", "gc.auto=0", "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+        "--end-of-options", url,
+    ];
     args.extend(refspecs.iter().map(String::as_str));
     git::run_network(cwd, &args).map_err(PrError::Git)?;
     let rev = |args: &[&str]| -> Result<String, PrError> {
@@ -901,6 +916,25 @@ mod tests {
     }
 
     #[test]
+    fn fetch_url_takes_only_a_forge_shaped_url() {
+        let repo = Repo { host: "git.example".into(), owner: "o".into(), name: "r".into() };
+        let answer = |url: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let urls = serde_json::json!({ "url": url, "sshUrl": "git@git.example:o/r.git" }).to_string();
+            let gh = fake_gh(dir.path(), &[("'config get git_protocol'*", "https\n", 0), ("'repo view'*", &urls, 0)]);
+            gh.fetch_url(&repo)
+        };
+        // An Enterprise host may run without TLS.
+        for good in ["https://git.example/o/r", "http://git.example/o/r", "ssh://git@git.example/o/r.git"] {
+            assert_eq!(answer(good).unwrap(), good);
+        }
+        for bad in ["--upload-pack=touch marker;:", "ext::sh -c touch% marker", "/srv/o/r", "file:///srv/o/r", "a@b/c:d", ""] {
+            assert!(matches!(answer(bad), Err(PrError::Gh(_))), "{bad:?}");
+        }
+        assert!(forge_url("git@git.example:o/r.git"));
+    }
+
+    #[test]
     fn head_moved_compares_head_ref_oid() {
         let dir = tempfile::tempdir().unwrap();
         let gh = fake_gh(dir.path(), &[("'pr view'*", r#"{"headRefOid":"bbb"}"#, 0)]);
@@ -1115,6 +1149,18 @@ mod tests {
     }
 
     #[test]
+    fn a_fetch_url_that_looks_like_an_option_runs_nothing() {
+        let (root, _bare, user, _) = github_and_clone();
+        let marker = root.path().join("marker");
+        let refs = || git(&user, &["for-each-ref"]);
+        let before = refs();
+        let url = format!("--upload-pack=touch '{}';:", marker.display());
+        assert!(matches!(fetch(&user, &url, 7, "main"), Err(PrError::Git(_))));
+        assert!(!marker.exists(), "the URL was read as an option");
+        assert_eq!(refs(), before);
+    }
+
+    #[test]
     fn a_pr_without_shared_history_is_an_error() {
         let (_root, bare, user, _) = github_and_clone();
         let other = repo();
@@ -1226,11 +1272,15 @@ pub mod test_support {
         let run=|args:&[&str]|{git::run(root,args).unwrap()};
         let head=String::from_utf8(run(&["rev-parse","HEAD"])).unwrap().trim().to_string();
         run(&["branch","base","HEAD~1"]);run(&["update-ref","refs/pull/9/head",&head]);run(&["remote","add","origin","https://github.com/o/r.git"]);
+        // The forge answers with a URL of a forge's shape; the repository's own config sends that fetch back to itself.
+        run(&["config",&format!("url.{}.insteadOf",root.to_string_lossy()),"https://lenz.invalid/o/r"]);
+        // That rewrite is the repository's own url.* config, which a network command refuses unless the test trusts it.
+        git::trust(root);
         let dir=root.join(".git/markdown-provider");std::fs::create_dir(&dir).unwrap();
         let view=serde_json::json!({"number":9,"title":"Markdown PR","author":{"login":"tester"},"state":"OPEN","isDraft":false,"body":"# Literal PR description","baseRefName":"base","headRefName":"topic","headRefOid":head,"url":"https://github.com/o/r/pull/9","additions":3,"deletions":2,"changedFiles":3,"isCrossRepository":false,"headRepository":null,"headRepositoryOwner":null});
         let page=serde_json::json!({"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]});
         let review=serde_json::json!({"data":{"repository":{"pullRequest":{"files":page,"comments":page,"reviews":page,"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"thread-9","isResolved":false,"isOutdated":false,"path":"ref.md","diffSide":"RIGHT","line":1,"startLine":null,"originalLine":1,"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"author":{"login":"reviewer"},"body":"Source line thread","createdAt":"2026-10-05T00:00:00Z"}]}}]}}}}});
-        for (name,value) in [("view.json",view),("review.json",review),("repo.json",serde_json::json!({"url":root.to_string_lossy(),"sshUrl":root.to_string_lossy()})),("head.json",serde_json::json!({"headRefOid":head}))] {let response=value.to_string();std::fs::write(dir.join(name),&response).unwrap();eprintln!("OFFLINE provider response {name}: {response}");}
+        for (name,value) in [("view.json",view),("review.json",review),("repo.json",serde_json::json!({"url":"https://lenz.invalid/o/r","sshUrl":"git@lenz.invalid:o/r.git"})),("head.json",serde_json::json!({"headRefOid":head}))] {let response=value.to_string();std::fs::write(dir.join(name),&response).unwrap();eprintln!("OFFLINE provider response {name}: {response}");}
         std::fs::write(dir.join("gh.sh"),r#"dir="$(dirname "$0")"
 printf '%s\n' "$*" >> "$dir/requests.log"
 case "$*" in

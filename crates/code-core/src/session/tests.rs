@@ -2595,7 +2595,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::CloseTerminal), Some("No terminal is open"));
     assert_eq!(disabled(CommandId::RecoverDrafts), Some("No recovered drafts are offered"));
     assert_eq!(disabled(CommandId::SaveAs), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Show / Hide Terminal", "New Terminal", "Focus Terminal", "Focus Editor", "Send Selection to Terminal", "Paste File Path to Terminal…", "Close Terminal Tab…", "Stop Terminal…", "Rename Terminal Tab…", "Restart Terminal", "Next Terminal Tab", "Previous Terminal Tab", "Copy Terminal Selection", "Find in Terminal…", "Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Replace in Project…", "Rename Symbol…", "Apply Previewed Edits", "Cancel Edit Preview", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "Replace", "Replace All", "List All Matches", "Go to Line…", "Soft Wrap", "Relative Line Numbers", "Vim Editing", "macOS Word Motion", "Save When Leaving a File", "Search Everywhere: Letters in File Names", "Search Everywhere: Rank by Open and Recent Files", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Show / Hide Results", "Stop Search", "Collapse / Expand All Results", "Next Result", "Previous Result", "Previous Results", "Next Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Close All Tabs", "Close Other Tabs", "Close Tabs to Left", "Close Tabs to Right", "Close Window", "Quit All Windows", "Select All", "Copy", "Cut", "Paste", "Delete", "Read-only Mode", "Undo", "Redo", "Save", "Save As…", "New File", "New Scratch File…", "Scratch Files…", "New File in Explorer…", "New Folder in Explorer…", "Copy File Name", "Copy Full Path", "Copy Project-Relative Path", "Copy File / Folder", "Paste File / Folder…", "Cancel File Copy", "Show File / Folder Git History", "Rename in Explorer…", "Move in Explorer…", "Delete in Explorer…", "Delete Permanently in Explorer…", "Restore Last Deleted Entry", "Recover Unsaved Draft…", "Recheck Saved File", "Confirm Rechecked Save", "Resolve External Change…", "Copy Path", "Copy Path:Line", "Copy Reference", "Go to Test or Subject", "Open in Editor", "Open with Default App", "Compare Saved Disk Inputs…", "Compare with Last Saved Version", "Close Saved Comparison", "Compare Selected Saved Disk Inputs", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Add Cursor Below", "Add Cursor Above", "Select Next Occurrence", "Collapse to Single Cursor", "Indent Selection", "Outdent Selection", "Toggle Comment", "Move Lines Up", "Move Lines Down", "Duplicate Lines Up", "Duplicate Lines Down", "Delete Line", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Code Completion", "Parameter Info", "Show Quick Fixes…", "Next Problem", "Previous Problem", "Problems…", "Show / Hide Activity Log", "Copy Activity Log", "Clear Activity Log", "Check Project Syntax", "Cancel Project Syntax Check", "Format Document", "Organize Imports", "Save Without Formatting", "Completion While Typing", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Install Language Server…", "Start Installation", "Cancel Installation", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "CSV: Table / Source", "CSV: Toggle Header Row", "CSV: Filter Selected Column…", "CSV: Sort Selected Column (Ascending / Descending / Source)", "CSV: Clear Filter", "CSV: Move Column Left", "CSV: Move Column Right", "CSV: Drop Selected Column", "CSV: Edit Selected Cell…", "Image Source / Rendered", "Markdown Source / Preview", "Open Markdown Preview to the Side", "Show in Source", "Follow Link", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Explorer: Always Select Opened File", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Inline Blame", "Close Annotations", "Narrow Annotation Gutter", "Widen Annotation Gutter", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Widen Explorer", "Narrow Explorer", "Make Results Taller", "Make Results Shorter", "Enlarge Left / Top Pane", "Enlarge Right / Bottom Pane", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…", "Editing Preferences…", "Project Indentation: Tabs", "Project Indentation: 2 Spaces", "Project Indentation: 4 Spaces", "Project Indentation: EditorConfig and Language Defaults", "Format on Save for This Project", "SQL Dialect…", "Configure SQL Metadata…", "Connect SQL Metadata", "Refresh SQL Metadata", "Disconnect SQL Metadata", "Inspect Marked Change", "Show Change Diff", "Revert This Change", "Close Change Inspector", "SQL Dialect for This File: PostgreSQL", "SQL Dialect for This File: DuckDB", "SQL Dialect for This File: Follow Project Default", "Project SQL Dialect: PostgreSQL", "Project SQL Dialect: DuckDB", "Project SQL Dialect: Not Set", "Keymap…", "Keymap: IntelliJ (Default)", "Keymap: VS Code", "Reset All Keybindings"]);    assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Show / Hide Terminal", "New Terminal", "Focus Terminal", "Focus Editor", "Send Selection to Terminal", "Paste File Path to Terminal…", "Close Terminal Tab…", "Stop Terminal…", "Rename Terminal Tab…", "Restart Terminal", "Next Terminal Tab", "Previous Terminal Tab", "Copy Terminal Selection", "Find in Terminal…", "Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Replace in Project…", "Rename Symbol…", "Apply Previewed Edits", "Cancel Edit Preview", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "Replace", "Replace All", "List All Matches", "Go to Line…", "Soft Wrap", "Relative Line Numbers", "Vim Editing", "macOS Word Motion", "Save When Leaving a File", "Search Everywhere: Letters in File Names", "Search Everywhere: Rank by Open and Recent Files", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Show / Hide Results", "Stop Search", "Collapse / Expand All Results", "Next Result", "Previous Result", "Previous Results", "Next Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Close All Tabs", "Close Other Tabs", "Close Tabs to Left", "Close Tabs to Right", "Close Window", "Quit All Windows", "Select All", "Copy", "Cut", "Paste", "Delete", "Read-only Mode", "Undo", "Redo", "Save", "Save As…", "New File", "New Scratch File…", "Scratch Files…", "New File in Explorer…", "New Folder in Explorer…", "Copy File Name", "Copy Full Path", "Copy Project-Relative Path", "Copy File / Folder", "Paste File / Folder…", "Cancel File Copy", "Show File / Folder Git History", "Rename in Explorer…", "Move in Explorer…", "Delete in Explorer…", "Delete Permanently in Explorer…", "Restore Last Deleted Entry", "Recover Unsaved Draft…", "Recheck Saved File", "Confirm Rechecked Save", "Resolve External Change…", "Copy Path", "Copy Path:Line", "Copy Reference", "Go to Test or Subject", "Open in Editor", "Open with Default App", "Compare Saved Disk Inputs…", "Compare with Last Saved Version", "Close Saved Comparison", "Compare Selected Saved Disk Inputs", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Add Cursor Below", "Add Cursor Above", "Select Next Occurrence", "Collapse to Single Cursor", "Indent Selection", "Outdent Selection", "Toggle Comment", "Move Lines Up", "Move Lines Down", "Duplicate Lines Up", "Duplicate Lines Down", "Delete Line", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Code Completion", "Parameter Info", "Show Quick Fixes…", "Next Problem", "Previous Problem", "Problems…", "Show / Hide Activity Log", "Copy Activity Log", "Clear Activity Log", "Check Project Syntax", "Cancel Project Syntax Check", "Format Document", "Organize Imports", "Save Without Formatting", "Completion While Typing", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Install Language Server…", "Start Installation", "Cancel Installation", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Trust Project Tools in This Folder", "Stop Trusting Project Tools in This Folder", "CSV: Table / Source", "CSV: Toggle Header Row", "CSV: Filter Selected Column…", "CSV: Sort Selected Column (Ascending / Descending / Source)", "CSV: Clear Filter", "CSV: Move Column Left", "CSV: Move Column Right", "CSV: Drop Selected Column", "CSV: Edit Selected Cell…", "Image Source / Rendered", "Markdown Source / Preview", "Open Markdown Preview to the Side", "Show in Source", "Follow Link", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Explorer: Always Select Opened File", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Inline Blame", "Close Annotations", "Narrow Annotation Gutter", "Widen Annotation Gutter", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Widen Explorer", "Narrow Explorer", "Make Results Taller", "Make Results Shorter", "Enlarge Left / Top Pane", "Enlarge Right / Bottom Pane", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…", "Editing Preferences…", "Project Indentation: Tabs", "Project Indentation: 2 Spaces", "Project Indentation: 4 Spaces", "Project Indentation: EditorConfig and Language Defaults", "Format on Save for This Project", "SQL Dialect…", "Configure SQL Metadata…", "Connect SQL Metadata", "Refresh SQL Metadata", "Disconnect SQL Metadata", "Inspect Marked Change", "Show Change Diff", "Revert This Change", "Close Change Inspector", "SQL Dialect for This File: PostgreSQL", "SQL Dialect for This File: DuckDB", "SQL Dialect for This File: Follow Project Default", "Project SQL Dialect: PostgreSQL", "Project SQL Dialect: DuckDB", "Project SQL Dialect: Not Set", "Keymap…", "Keymap: IntelliJ (Default)", "Keymap: VS Code", "Reset All Keybindings"]);    assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::WidenExplorer), Some("No folder or library is open"));
     assert_eq!(disabled(CommandId::TallerResults), Some("No search results are shown"));
@@ -8708,7 +8708,7 @@ fn server_menus_share_actions_and_keep_diagnostics_in_copyable_details() {
     for path in [None, Some(write(d.path(), "note.txt", b"plain text")), Some(write(d.path(), "main.py", b"def main(): pass"))] {
         if let Some(path) = path { s.dispatch(Command::Open(path)); settle(&mut s, opened); }
         let rows = s.language_server_rows();
-        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.len(), 11);
         assert_eq!(rows[0].1, Some(CommandId::ServerDetails));
         assert!(rows.iter().all(|(_, action)| action.is_some() && *action != Some(CommandId::CopyServerDetails)));
         let menu = s.menu(Some(CommandGroup::LanguageServers));
@@ -9494,6 +9494,31 @@ mod git_branches {
     }
 
     #[test]
+    fn a_repository_arriving_in_an_open_folder_runs_none_of_its_programs() {
+        let e = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let ran = elsewhere.path().join("ran");
+        let hook = elsewhere.path().join("fsmonitor.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", ran.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut s = session(&elsewhere.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(e.path().to_path_buf()));
+        settle(&mut s, |s| s.state().repo_checked());
+        // extracted elsewhere, its `.git` moved in last
+        let made = tempfile::tempdir().unwrap();
+        git(made.path(), &["init", "-q", "-b", "trunk"]);
+        write(made.path(), "a.txt", b"x\n");
+        git(made.path(), &["add", "a.txt"]);
+        git(made.path(), &["commit", "-q", "-m", "a"]);
+        git(made.path(), &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        write(e.path(), "a.txt", b"y\n");
+        std::fs::rename(made.path().join(".git"), e.path().join(".git")).unwrap();
+        tick(&mut s);
+        settle(&mut s, |s| s.branch_label().is_some() && s.state.git_status.is_some() && !s.git_status_running);
+        assert!(!ran.exists(), "the arriving repository's fsmonitor hook ran");
+    }
+
+    #[test]
     fn a_worktree_whose_folder_is_gone_is_marked_and_offers_nothing() {
         let (_r, wt, mut s) = repo_session();
         std::fs::remove_dir_all(wt.path().join("second")).unwrap();
@@ -9730,6 +9755,10 @@ mod git_branches {
         git(r.path(), &["switch", "-q", "feature/x"]);
         git(r.path(), &["branch", "-q", "-D", "main"]);
         assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/remotes/origin/main".to_string()]), "else the remote's default");
+        // A file named like the base goes by its commit, as Revision does.
+        put(r.path(), "refs/remotes/origin/main", "a file\n");
+        let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec![sha]));
         let lone = repo();
         put(lone.path(), "a.txt", "a\n");
         commit_all(lone.path(), "1");
@@ -9737,6 +9766,11 @@ mod git_branches {
         let mut s = session(&lone.path().join(".lenz-test"));
         s.dispatch(Command::OpenRoot(lone.path().to_path_buf()));
         settle(&mut s, |s| s.branch_label().is_some());
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Err("Compare with Base Branch: no main or master branch to compare with".into()));
+        // The repository writes origin/HEAD: one naming a Lenz Diff subcommand is no base branch.
+        let sha = git(lone.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        put(lone.path(), ".git/pr", format!("{sha}\n"));
+        put(lone.path(), ".git/refs/remotes/origin/HEAD", "ref: pr\n");
         assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Err("Compare with Base Branch: no main or master branch to compare with".into()));
     }
 
@@ -9888,6 +9922,21 @@ mod git_branches {
         assert_eq!(s.validate_revision("nope"), Err("No commit named \"nope\"".into()));
         checkout(&mut s, Target::Branch("no-such-branch".into()));
         assert!(s.status_message().contains("no-such-branch"), "git's own words: {}", s.status_message());
+    }
+
+    #[test]
+    fn a_tag_row_checks_out_its_tag_though_a_branch_shares_its_short_name() {
+        let (r, _wt, mut s) = repo_session();
+        let tagged = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        git(r.path(), &["tag", "heads/main"]);
+        put(r.path(), "a.txt", "moved on\n");
+        commit_all(r.path(), "main moves on");
+        let target = BranchTarget::Tag("heads/main".into()).checkout().unwrap();
+        assert_eq!(target, Target::Detached("refs/tags/heads/main".into()));
+        checkout(&mut s, target);
+        assert_eq!(git(r.path(), &["rev-parse", "HEAD"]).trim(), tagged, "the tag's commit, not main's");
+        // What is typed stays as typed.
+        assert_eq!(BranchTarget::Revision("v1".into()).checkout(), Some(Target::Detached("v1".into())));
     }
 
     #[test]
@@ -10559,8 +10608,10 @@ fn lenz_reader_folders_move_to_lenz_code_once_and_never_lose_settings() {
     let saved = |dir: &std::path::Path| serde_json::json!({ "pyright": { "executable": dir.join("servers/node_modules/.bin/pyright-langserver") }, "other": "/usr/bin/lenz-reader/x" }).to_string();
     std::fs::write(old.join("providers.json"), saved(&old)).unwrap();
     std::fs::write(old.join("projects/p.json"), serde_json::json!([old.join("scratch-files/1.txt")]).to_string()).unwrap();
+    std::fs::set_permissions(old.join("providers.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
     let new = super::code_folder(&base);
     assert_eq!(std::fs::read_to_string(new.join("providers.json")).unwrap(), saved(&new));
+    assert_eq!(std::fs::metadata(new.join("providers.json")).unwrap().permissions().mode() & 0o777, 0o600, "a private file stays private");
     assert_eq!(std::fs::read_to_string(new.join("projects/p.json")).unwrap(), serde_json::json!([new.join("scratch-files/1.txt")]).to_string());
     assert!(!new.join("providers.json.moving").exists());
     // Both: the new one is used and the old one left alone.

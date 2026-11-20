@@ -64,7 +64,13 @@ impl ImageView {
 }
 
 impl Viewer {
+    /// The rendering on screen: none while an SVG shows its Source.
     pub(super) fn image_doc(&self) -> Option<Arc<ImageDoc>> {
+        self.rendering_doc().filter(|d| !(d.source && self.iview.mode() == Mode::Source))
+    }
+
+    /// The comparison's rendering, also while its Source is shown: what the image modes act on.
+    pub(super) fn rendering_doc(&self) -> Option<Arc<ImageDoc>> {
         self.doc().and_then(|d| d.image.clone())
     }
 
@@ -259,7 +265,8 @@ impl Viewer {
             };
             let factor = (zoom.floor() as u32).min(16);
             let sources: &[usize] = match self.iview.state.mode() {
-                Mode::TwoUp | Mode::Swipe => &[0, 1],
+                // Source hides the rendering (image_doc() is none), so it is never drawn
+                Mode::TwoUp | Mode::Swipe | Mode::Source => &[0, 1],
                 Mode::Onion => &[3],
                 Mode::Difference => &[2],
             };
@@ -461,7 +468,8 @@ pub(super) fn paint_images(palette: &theme::Palette,
     };
     let stage = bounds(x0, w);
     match f.mode {
-        Mode::TwoUp => {
+        // Source hides the rendering (image_doc() is none); it would draw as 2-up
+        Mode::TwoUp | Mode::Source => {
             for (i, px0) in [(0, x0), (1, x0 + pane_w + GUTTER_W)] {
                 let width=f.widths[i];
                 let clip = bounds(px0, width);

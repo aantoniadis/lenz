@@ -77,8 +77,9 @@ the reason, and **Status details…** in F10 shows the full message.
 ## Paste a file path
 
 In the desktop, drag a file from the explorer, an open file tab or your file manager
-into the terminal's cells. Lenz pastes its absolute path with POSIX shell quoting;
-spaces and apostrophes stay part of the filename. Several paths are separated by
+into the terminal's cells. Lenz pastes its absolute path quoted as one literal word
+for POSIX shells (sh, bash, zsh) and fish; spaces, apostrophes and backslashes stay
+part of the filename. Several paths are separated by
 spaces. Nothing is executed or saved, and a drop elsewhere does not send a path.
 Untitled documents need to be saved before they have a path to send.
 

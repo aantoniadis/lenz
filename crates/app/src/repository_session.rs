@@ -1696,8 +1696,9 @@ impl RepositorySession {
             }
             Some(SourceAction::Tag(commit)) => {
                 // ponytail: tags on one commit share a row action, so the first one's name is used
-                let tag = self.picker.sources.tags.iter().find(|t| t.commit == commit).map_or(commit.clone(), |t| t.name.clone());
-                vec![command(C::Checkout(Target::Detached(tag.clone()))), new_branch(&format!("refs/tags/{tag}"))]
+                // Fully named: a branch, remote, `$GIT_DIR` file or object id sharing the short name must not win.
+                let tag = self.picker.sources.tags.iter().find(|t| t.commit == commit).map_or(commit.clone(), |t| format!("refs/tags/{}", t.name));
+                vec![command(C::Checkout(Target::Detached(tag.clone()))), new_branch(&tag)]
             }
             Some(SourceAction::Worktree(path)) => match self.picker.sources.worktrees.iter().find(|w| w.path == path) {
                 // A bare repository has no files, and a removed folder nothing to show.
@@ -2715,6 +2716,11 @@ impl RepositorySession {
             C::ToggleMessage(Some(i)) => if let Some(open) = self.message.as_mut().and_then(|m| m.open.get_mut(i)) { *open = !*open; self.message_cursor = i; },
             C::MessageCursor(i) => self.message_cursor = i,
             C::PrCommit(sha) => if let Some(pr) = self.pr.as_mut() {
+                // the forge names the commit: only an object id may reach git
+                if sha.as_deref().is_some_and(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
+                    self.notice = Some("Not a commit id".into());
+                    return;
+                }
                 // Files changed, for that commit alone or the whole PR again
                 let spec = match &sha { Some(sha) => branch_comparison(&format!("{sha}^1"), sha, false), None => pr.fetched.spec() };
                 pr.shown_commit = sha;
@@ -3377,6 +3383,19 @@ mod session_tests {
         assert!(state.pr.is_none(),"ordinary navigation to a PR commit must leave review context");
     }
     #[test]
+    fn a_forge_commit_id_that_is_not_hex_never_reaches_git() {
+        let root=repo();write(root.path(),"ref.md","old\n");commit_all(root.path(),"Before");
+        write(root.path(),"ref.md","new\n");commit_all(root.path(),"After");
+        let _provider=crate::pr::test_support::markdown_provider(root.path());
+        let mut state=open(root.path());
+        state.execute(RepositoryCommand::OpenPr(Some("9".into())));settle(&mut state);
+        let elsewhere=tempfile::tempdir().unwrap();let target=elsewhere.path().join("written");
+        state.execute(RepositoryCommand::PrCommit(Some(format!("--output={}",target.display()))));settle(&mut state);
+        assert_eq!(state.notice.as_deref(),Some("Not a commit id"));
+        assert!(state.pr.as_ref().is_some_and(|pr|pr.shown_commit.is_none()),"the PR's Files changed stay");
+        assert!(!target.exists()&&!elsewhere.path().join("written^1").exists());
+    }
+    #[test]
     fn shared_quiet_refresh_keeps_range_ids_and_ignores_obsolete_filter_results(){
         let root=repo();write(root.path(),"file","first\n");commit_all(root.path(),"First");
         write(root.path(),"file","second\n");commit_all(root.path(),"Second");
@@ -3860,10 +3879,31 @@ mod checkout_tests {
         let (_r, _wt, mut state) = fixture();
         state.execute(RepositoryCommand::Source(SourceAction::Toggle("Tags")));
         let tag = row(&state, |a| matches!(a, SourceAction::Tag(_)));
-        assert!(matches!(&state.source_menu(tag)[0].1, SourceEntry::Command(RepositoryCommand::Checkout(Target::Detached(t))) if t == "v1"));
+        assert!(matches!(&state.source_menu(tag)[0].1, SourceEntry::Command(RepositoryCommand::Checkout(Target::Detached(t))) if t == "refs/tags/v1"));
         assert!(matches!(&state.source_menu(tag)[1].1, SourceEntry::NewBranchFrom(t) if t == "refs/tags/v1"));
         assert_eq!(state.disabled(&RepositoryCommand::Checkout(Target::Branch("side".into()))), Some("Checked out in another worktree"));
         assert_eq!(state.disabled(&RepositoryCommand::Checkout(Target::Branch("other".into()))), None);
+    }
+
+    #[test]
+    fn a_tag_row_checks_out_its_own_commit_though_a_branch_shares_the_tag_name() {
+        let (r, _wt, mut state) = fixture();
+        let tagged = git(r.path(), &["rev-parse", "v1^{commit}"]).trim().to_string();
+        // The only tag on v1's commit besides v1, newer, and named so `heads/main` resolves to the branch.
+        git(r.path(), &["tag", "-d", "v1"]);
+        git(r.path(), &["tag", "heads/main", &tagged]);
+        write(r.path(), "a.txt", "main moved on\n");
+        commit_all(r.path(), "main moves on");
+        assert_ne!(git(r.path(), &["rev-parse", "main"]).trim(), tagged);
+        state.execute(RepositoryCommand::RefreshRepository);
+        settle(&mut state);
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Tags")));
+        let tag = row(&state, |a| matches!(a, SourceAction::Tag(c) if *c == tagged));
+        let SourceEntry::Command(checkout_tag) = state.source_menu(tag)[0].1.clone() else { panic!("Checkout") };
+        state.execute(checkout_tag);
+        settle(&mut state);
+        assert_eq!(git(r.path(), &["rev-parse", "HEAD"]).trim(), tagged, "the row's commit, not main's");
+        assert_eq!(state.notice.as_deref(), Some("Checked out heads/main"));
     }
 
     #[test]
