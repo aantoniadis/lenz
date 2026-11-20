@@ -1483,9 +1483,10 @@ impl Semantics {
     /// remembered across restarts: the servers of browsing root `browse`, those held back and those of workspaces in
     /// `folder` stop, and every workspace's server is chosen again (typescript-go depends on it), so held-back servers
     /// start (or trusted ones stay stopped) without reopening anything. Returns the settings to save.
-    pub fn set_trust(&mut self, folder: PathBuf, trusted: bool, browse: Option<&Path>) -> Settings {
+    /// `inner` keeps the answers for folders inside `folder` (the dialog's Stay Restricted); else they are replaced.
+    pub fn set_trust(&mut self, folder: PathBuf, trusted: bool, inner: bool, browse: Option<&Path>) -> Settings {
         self.reload();
-        self.settings.set_trust(folder.clone(), trusted);
+        if !trusted && inner { self.settings.stay_restricted(folder.clone()); } else { self.settings.set_trust(folder.clone(), trusted); }
         self.restart_where(|me, s| browse.is_some_and(|b| s.key.root.starts_with(b)) || matches!(s.status, Status::Restricted(_))
             || me.real.get(&s.key.root).is_some_and(|r| r.0.starts_with(&folder)));
         self.settings.clone()

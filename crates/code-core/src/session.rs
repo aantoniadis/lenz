@@ -6230,7 +6230,7 @@ impl Session {
                 if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
                 let Some(real) = self.project_real.clone() else { return Effect::default() };
                 self.state.trust_prompt = None;
-                self.set_folder_trust(real, trusted)
+                self.set_folder_trust(real, trusted, false)
             }
             Command::TrustChoice(choice) => self.choose_trust(choice),
             Command::TrustFocus(to) => self.move_trust_focus(to),

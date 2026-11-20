@@ -159,16 +159,18 @@ impl Session {
             self.state.messages.push("Folder trust: language server settings are being saved; choose again in a moment".into());
             return Effect { repaint: true, ..Effect::default() };
         }
-        self.set_folder_trust(folder, trusted)
+        // Stay Restricted keeps the answers for folders inside (it is also what Enter and Escape choose).
+        self.set_folder_trust(folder, trusted, !trusted)
     }
 
     /// Trust `folder` (a path with its links resolved), or keep it restricted, saved privately: servers held back
-    /// start, or those that ran because of trust stop, without reopening anything.
-    pub(super) fn set_folder_trust(&mut self, folder: PathBuf, trusted: bool) -> Effect {
+    /// start, or those that ran because of trust stop, without reopening anything. `inner` keeps the answers for
+    /// folders inside it.
+    pub(super) fn set_folder_trust(&mut self, folder: PathBuf, trusted: bool, inner: bool) -> Effect {
         let browse = self.state.project.as_ref().map(|p| p.root().to_owned());
         self.state.asking = None;
         self.cancel_semantic_analysis();
-        let settings = self.state.semantics.set_trust(folder.clone(), trusted, browse.as_deref());
+        let settings = self.state.semantics.set_trust(folder.clone(), trusted, inner, browse.as_deref());
         self.save_provider_settings(settings);
         self.synced = 0;
         self.state.messages.push(if trusted { format!("Trusted {}: its project tools may run", folder.display()) }

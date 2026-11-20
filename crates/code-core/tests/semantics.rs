@@ -5184,6 +5184,27 @@ fn trust_parent_folder_after_staying_restricted_trusts_the_folder() {
     f.open("src/main.rs");
 }
 
+/// The dialog's Stay Restricted (also what Enter and Escape choose) keeps the trust given to a folder inside the open
+/// one; Stop Trusting Project Tools in This Folder revokes it.
+#[test]
+fn staying_restricted_keeps_the_trust_of_folders_inside_and_stop_trusting_revokes_it() {
+    use code_core::semantics::provider::{Settings, Trust};
+    let mut f = untrusted_fixture("rust-analyzer", &[("src/main.rs", "fn main() {}\n"), ("sub/keep.txt", "\n")], serde_json::json!({}));
+    let sub = std::fs::canonicalize(f.root.join("sub")).unwrap();
+    decide(&mut f, "trusted", &[&sub]);
+    let (providers, real) = (f._dir.path().join("config/providers.json"), std::fs::canonicalize(&f.root).unwrap());
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(|s| s.trust_text().is_some());
+    f.s.dispatch(Command::TrustChoice(TrustChoice::StayRestricted));
+    // Saved: a trust command given while the save runs is refused.
+    f.settle(|s| Settings::read(&providers).trust(&real) == Trust::Declined && s.disabled(CommandId::FolderTrust).is_none());
+    assert_eq!(Settings::read(&providers).trust(&sub), Trust::Trusted, "a stray Enter on the parent untrusted the folder inside");
+    f.s.dispatch(Command::SetProjectToolsTrusted(false));
+    f.settle(|_| Settings::read(&providers).trust(&sub) == Trust::Declined);
+}
+
 /// The dialog asks only about what the open folder's own answer decides: a server held back for a folder outside the
 /// open one, or inside it but declined on its own, stays restricted without asking about the open folder.
 #[test]

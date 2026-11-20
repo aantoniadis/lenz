@@ -1234,6 +1234,13 @@ impl Settings {
         if trusted { self.trusted.insert(folder); } else { self.declined.insert(folder); }
     }
 
+    /// Keep `folder` (a canonical path) restricted as the dialog's Stay Restricted does: the answers given for
+    /// folders inside it stay, so a stray Enter on a parent folder does not undo the trust of the projects in it.
+    pub fn stay_restricted(&mut self, folder: PathBuf) {
+        self.trusted.remove(&folder);
+        self.declined.insert(folder);
+    }
+
     /// `provider`'s `initializationOptions`: its defaults with the user's settings merged over them, object by
     /// object (a user's `settings.java.format` keeps the default `settings.java.autobuild`).
     pub fn initialization(&self, provider: &Provider, root: Option<&Path>) -> serde_json::Value {
@@ -2169,6 +2176,22 @@ mod tests {
         s.set_trust(PathBuf::from("/w2"), true);
         s.set_trust(parent.clone(), true);
         assert_eq!(s.trusted.len(), 3, "folders beside it keep their answers (/w2 is not inside /w)");
+    }
+
+    /// The dialog's Stay Restricted keeps the answers for folders inside: a project trusted inside a folder kept
+    /// restricted stays trusted (and bounds its own programs), while the folder itself is no longer trusted.
+    #[test]
+    fn staying_restricted_keeps_the_answers_for_folders_inside() {
+        let mut s = Settings::default();
+        let (parent, child) = (PathBuf::from("/w"), PathBuf::from("/w/proj"));
+        s.set_trust(child.clone(), true);
+        s.set_trust(child.join("vendor"), false);
+        s.stay_restricted(parent.clone());
+        assert_eq!((s.trust(&child.join("src")), s.trust(&child.join("vendor")), s.trust(&parent.join("other"))), (Trust::Trusted, Trust::Declined, Trust::Declined));
+        assert_eq!(s.trusted_folder(&child.join("src")), Some(child.as_path()));
+        s.set_trust(parent.clone(), true);
+        s.stay_restricted(parent.clone());
+        assert!(!s.trusted.contains(&parent) && s.declined.contains(&parent), "a folder is in one set at most");
     }
 
     /// The project's own programs are found no higher than the trusted folder deciding the workspace, nor than the

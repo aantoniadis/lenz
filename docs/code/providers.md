@@ -141,8 +141,10 @@ them.
 The answers are saved privately (`0600`) outside every checkout, under `trusted` and `declined` in
 `$XDG_CONFIG_HOME/lenz-code/providers.json`, by the folder's real path (links resolved). The nearest decision wins: a
 folder you keep restricted inside a trusted one stays restricted. An answer replaces those given before for the folders
-inside it: trusting a folder (or its parent) trusts the folders inside it that you had kept restricted, and keeping a
-folder restricted also restricts the folders inside it that you had trusted. A folder kept restricted inside a trusted
+inside it: trusting a folder (or its parent) trusts the folders inside it that you had kept restricted, and **Stop
+Trusting Project Tools in This Folder** also restricts the folders inside it that you had trusted. The dialog's **Stay
+Restricted** (and so Enter or Escape) keeps only that folder restricted: folders inside it that you trusted stay
+trusted, their programs still found only inside them. A folder kept restricted inside a trusted
 one only keeps off the servers whose workspace is that folder: a server for the trusted folder around it serves the
 whole tree, the restricted folder's files included. With no folder open, Lenz never asks; a file inside a trusted folder
 is trusted, any other file stays restricted. Trust is per folder, not per tool.
