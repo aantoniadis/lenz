@@ -64,32 +64,44 @@ pub struct Untrusted {
 /// git would recognise it yet (`HEAD`, `objects`, `refs`).
 type Stamp = Option<(PathBuf, [Option<[i64; 4]>; 2], [bool; 3])>;
 
-/// Probes by directory, with the [`Stamp`] each was taken under (`None`: trusted, never asked again).
-type Seen = HashMap<PathBuf, (Option<Stamp>, Arc<Untrusted>)>;
+/// Probes by directory, with the [`Stamp`] each was taken under.
+type Seen = HashMap<PathBuf, (Stamp, Arc<Untrusted>)>;
 
 fn seen() -> &'static Mutex<Seen> {
     static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
     SEEN.get_or_init(Default::default)
 }
 
+/// Directories [`trust`] marked: kept apart from the probe cache, so a probe that started before [`trust`] and
+/// finishes after it cannot overwrite the mark.
+#[cfg(any(test, feature = "git-testing"))]
+fn trusted() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static TRUSTED: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    TRUSTED.get_or_init(Default::default)
+}
+
 /// Treats `cwd`'s repository config as the user's own, as a driver in their global config would be.
 #[cfg(any(test, feature = "git-testing"))]
 pub fn trust(cwd: &Path) {
-    let mut seen = seen().lock().unwrap_or_else(PoisonError::into_inner);
-    seen.insert(cwd.to_path_buf(), (None, Arc::default()));
+    let mut trusted = trusted().lock().unwrap_or_else(PoisonError::into_inner);
+    trusted.insert(cwd.to_path_buf());
     // git names the top level by its resolved path (macOS temp dirs sit behind the /var -> /private/var link)
     if let Ok(resolved) = cwd.canonicalize() {
-        seen.insert(resolved, (None, Arc::default()));
+        trusted.insert(resolved);
     }
 }
 
 /// [`Untrusted`] for `cwd`, asked again whenever the repository there is not the one it was asked of: one that
 /// arrives (extracted, copied, synced) or is replaced at a probed directory.
 pub fn untrusted(cwd: &Path) -> Arc<Untrusted> {
+    #[cfg(any(test, feature = "git-testing"))]
+    if trusted().lock().unwrap_or_else(PoisonError::into_inner).contains(cwd) {
+        return Arc::default();
+    }
     let seen = seen();
     let now = stamp(cwd);
     if let Some((was, found)) = seen.lock().unwrap_or_else(PoisonError::into_inner).get(cwd)
-        && was.as_ref().is_none_or(|was| *was == now)
+        && *was == now
     {
         return found.clone();
     }
@@ -106,7 +118,7 @@ pub fn untrusted(cwd: &Path) -> Arc<Untrusted> {
         .output();
     let found = Arc::new(out.map(|o| untrusted_from(&o.stdout)).unwrap_or_default());
     if !found.includes {
-        seen.lock().unwrap_or_else(PoisonError::into_inner).insert(cwd.to_path_buf(), (Some(now), found.clone()));
+        seen.lock().unwrap_or_else(PoisonError::into_inner).insert(cwd.to_path_buf(), (now, found.clone()));
     }
     found
 }
