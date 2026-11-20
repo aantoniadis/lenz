@@ -105,6 +105,10 @@ copying each test executable and alternating them. Version 2 adds `repacked.zip`
 new side deflated at level 1, so no unchanged member keeps its stored bytes and every member is decompressed
 (the worst case for zip). Version 1's cases are unchanged.
 
+`archive_large_zip_pair_probe` (same command, that test name) prints `LENZ_ARCHIVE_LARGE_PROBE` version 1: a Change
+Set load of two ~200 MiB zips of 100 stored 2 MiB members that differ in one, five loads after a warm-up, with each
+load's time, peak RSS growth and absolute peak (`VmHWM`, Linux only).
+
 `scripts/code-editor-gui-bench.py` schema 2 drains preceding XDamage events before
 rearming the NonEmpty damage region. Older versions could discard a late paint
 notification after rearming, leaving the region nonempty and suppressing the

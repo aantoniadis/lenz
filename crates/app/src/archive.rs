@@ -1076,6 +1076,54 @@ mod tests {
         assert!(unpack(Compression::Zstd, &cut, 1 << 20).unwrap_err().contains("truncated zstd skippable frame"));
     }
 
+    /// Change Set load of two ~200 MiB zips of 100 stored 2 MiB members that differ in one member: time and peak RSS
+    /// growth per load. `cargo test --release -p lenz --no-default-features --lib archive_large_zip_pair_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn archive_large_zip_pair_probe() {
+        let status = |key: &str| {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            status.lines().find_map(|l| l.strip_prefix(key)?.trim().strip_suffix("kB")?.trim().parse::<f64>().ok()).map(|kb| kb / 1024.)
+        };
+        let (count, len) = (100, 2 << 20);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let old: Vec<(String, Vec<u8>)> = (0..count).map(|i| {
+            let bytes = (0..len / 8).flat_map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()
+            }).collect();
+            (format!("assets/a{i:03}.bin"), bytes)
+        }).collect();
+        let mut new = old.clone();
+        new[count / 2].1[len / 2] ^= 1;
+        let stored = |files: &[(String, Vec<u8>)]| zip_of(&files.iter().map(|(n, c)| (n.as_str(), c.as_slice(), zip::CompressionMethod::Stored)).collect::<Vec<_>>());
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("old.zip"), d.path().join("new.zip"));
+        std::fs::write(&left, stored(&old)).unwrap();
+        std::fs::write(&right, stored(&new)).unwrap();
+        drop((old, new));
+        let spec = crate::changeset::Spec::Plain { left: left.clone(), right: right.clone() };
+        let (mut ms, mut growth, mut peak) = (Vec::new(), Vec::new(), Vec::new());
+        for sample in 0..6 {
+            let _ = std::fs::write("/proc/self/clear_refs", "5");
+            let before = status("VmRSS:");
+            let started = std::time::Instant::now();
+            let set = crate::changeset::ChangeSet::load(&spec, d.path()).unwrap();
+            let elapsed = started.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(listed(&set), [("a050.bin".into(), crate::changeset::Status::Modified)]);
+            if sample > 0 {
+                ms.push(elapsed);
+                growth.extend(before.zip(status("VmHWM:")).map(|(before, peak)| peak - before));
+                peak.extend(status("VmHWM:"));
+            }
+        }
+        let bytes = [std::fs::metadata(&left).unwrap().len(), std::fs::metadata(&right).unwrap().len()];
+        println!("LENZ_ARCHIVE_LARGE_PROBE {}", serde_json::json!({"version": 1, "loadavg": std::fs::read_to_string("/proc/loadavg").ok(),
+            "archive_bytes": bytes, "load_ms": ms, "peak_rss_growth_mib": growth, "peak_rss_mib": peak}));
+    }
+
     /// A zip of `files` deflated at level 1, where [`testing::zip`] uses the default level.
     fn repacked(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
