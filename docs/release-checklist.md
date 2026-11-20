@@ -25,7 +25,7 @@ Run the [full or stress suite](benchmarking.md) and keep its result directory fo
 - [ ] **Pathological pair stays usable.** `target/release/lenz /tmp/lenz-fx/different-100k/left.rs /tmp/lenz-fx/different-100k/right.rs` opens (note first paint) and scrolls.
 - [ ] **Memory after highlighting.** On Linux, `python3 scripts/startup-bench.py -- /tmp/lenz-fx/generated-100k/left.rs /tmp/lenz-fx/generated-100k/right.rs` measures first paint and RSS on a private Xvfb display. Repeat for a large merge, and compare with a saved binary using `--baseline`.
 - [ ] **Memory while browsing.** Generate disposable inputs with `scripts/perf-fixtures.py`, then use `scripts/interaction-bench.py` for repeated text and image file switching and merge shortcut repaints.
-- [ ] **Stripped binary ≤ 80 MB.** `strip -o /tmp/lenz-stripped target/release/lenz && wc -c < /tmp/lenz-stripped` prints at most 80000000.
+- [ ] **Stripped binary ≤ 85 MB.** `strip -o /tmp/lenz-stripped target/release/lenz && wc -c < /tmp/lenz-stripped` prints at most 85000000.
 
 ## UI walkthrough
 

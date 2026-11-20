@@ -41,14 +41,14 @@ step "collector tests"
 python3 -m unittest discover -s scripts -p 'test_*.py'
 step "standalone terminal release builds (without GUI features)"
 cargo build --release --locked -p lenz-tui -p code-tui
-step "release build and stripped size (≤ 80,000,000 bytes)"
+step "release build and stripped size (≤ 85,000,000 bytes)"
 cargo build --release --locked -p lenz
 stripped=$(mktemp)
 trap 'rm -f "$stripped"' EXIT
 strip -o "$stripped" target/release/lenz
 size=$(wc -c < "$stripped")
 echo "stripped lenz: $size bytes"
-test "$size" -le 80000000
+test "$size" -le 85000000
 
 if [[ ${1:-} == --old-git ]]; then
     step "core tests on git 2.30 (Debian bullseye)"

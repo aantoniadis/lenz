@@ -2658,10 +2658,20 @@ longer to highlight in full return plain text 10.0–10.2 s after the parse star
 
 tree-sitter-sequel 0.3.12 and 0.3.13 (which fix a scanner leak across serialization) nearly double the SQL
 grammar's parse table (17,329 → 32,966 states): the stripped release `lenz` grew from 69,088,160 to 80,021,536
-bytes, over the 80,000,000-byte gate in `scripts/ci-local.sh`. The update is not taken for now. tree-sitter-ruby is taken from upstream (0.23.1 plus its heredoc serialization fix)
-(its size effect was not measured separately; the 69,088,160 bytes above include it).
+bytes, over the 80,000,000-byte gate in `scripts/ci-local.sh`. tree-sitter-ruby is taken from upstream (0.23.1 plus
+its heredoc serialization fix; its size effect was not measured separately, the 69,088,160 bytes above include it).
 
 The Merge View now joins a one-sided insertion or deletion with the other side's change when repeated lines would
 let it sit right next to that change (git conflicts there). Engine bench `merge-100k`, two alternating rounds on the
 same machine, with and without the join: Default 63.5/65.2 vs 63.5/63.8 ms, Ignore 79.5/79.4 vs 79.2/79.2 ms
 (medians of 11). No measurable cost.
+
+## tree-sitter-sequel 0.3.13 and the stripped size budget — 2026-11-20
+
+Lenz takes tree-sitter-sequel 0.3.13 (its scanner no longer leaks across serialization). Its SQL grammar, from 0.3.12
+on, nearly doubles the parse table (17,329 → 32,966 states), and the stripped release `lenz` grows from 69.09 MB to
+about 80.02 MB (69,088,160 → 80,021,536 bytes). By owner decision the stripped-size budget in `scripts/ci-local.sh`
+(and the manual CI workflow and release checklist) rises from 80,000,000 to 85,000,000 bytes. Runtime: a generated
+100,000-line, 5.5 MiB SQL file, parsed and highlighted in release (median of 7, two runs each): 0.3.11 1,190 / 1,064 ms,
+0.3.13 1,066 / 1,087 ms; no difference beyond run-to-run spread. Not measured: memory while parsing SQL, the `dist`
+profile, native macOS.

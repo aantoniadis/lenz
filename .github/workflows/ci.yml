@@ -45,13 +45,13 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked -p lenz
 
-      - name: Stripped release binary ≤ 80 MB (80,000,000 bytes)
+      - name: Stripped release binary ≤ 85 MB (85,000,000 bytes)
         shell: bash
         run: |
           strip -o lenz-stripped target/release/lenz
           size=$(wc -c < lenz-stripped)
           echo "stripped lenz: $size bytes"
-          test "$size" -le 80000000
+          test "$size" -le 85000000
 
   # The oldest git Lenz supports: Debian bullseye ships git 2.30.2.
   git-2-30:

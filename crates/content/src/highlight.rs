@@ -28,7 +28,7 @@
 //! | JSON | [tree-sitter-json 0.24.8](https://github.com/tree-sitter/tree-sitter-json) | MIT | bundled |
 //! | YAML | [tree-sitter-yaml 0.7.2](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | MIT | bundled |
 //! | TOML | [tree-sitter-toml-ng 0.7.0](https://github.com/tree-sitter-grammars/tree-sitter-toml) | MIT | bundled |
-//! | SQL | [tree-sitter-sequel 0.3.11](https://github.com/derekstride/tree-sitter-sql) | MIT | bundled |
+//! | SQL | [tree-sitter-sequel 0.3.13](https://github.com/derekstride/tree-sitter-sql) | MIT | bundled |
 //! | Markdown | [tree-sitter-md 0.5.3](https://github.com/tree-sitter-grammars/tree-sitter-markdown) | MIT | blocks + paragraph inline offsets |
 //! | Dockerfile | [tree-sitter-containerfile 0.9.2](https://github.com/wharflab/tree-sitter-containerfile) | MIT | bundled |
 //! | Makefile | [tree-sitter-make 1.1.1](https://github.com/tree-sitter-grammars/tree-sitter-make) | MIT | bundled |
