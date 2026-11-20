@@ -2675,3 +2675,67 @@ about 80.02 MB (69,088,160 → 80,021,536 bytes). By owner decision the stripped
 100,000-line, 5.5 MiB SQL file, parsed and highlighted in release (median of 7, two runs each): 0.3.11 1,190 / 1,064 ms,
 0.3.13 1,066 / 1,087 ms; no difference beyond run-to-run spread. Not measured: memory while parsing SQL, the `dist`
 profile, native macOS.
+
+## 0.0.18 hardening costs and zip member comparison — 2026-11-20
+
+0.0.18's hardening traded speed for correctness in four places. Each was measured when it landed, on one Linux
+machine that was loaded by other work at the time: the archive, PostgreSQL and SVG figures in release builds, the
+folder-listing figure by timing the git commands each listing runs:
+
+| Change in 0.0.18 | Before → after (median) | Method |
+| --- | --- | --- |
+| Archive member identity: size + SHA-256 of the extracted bytes, never a stored CRC-32 or listing | zip 5,000 × 2 KiB **3.4 → 46.9 ms**, 32 × 2 MiB **2.9 → 113.2 ms**; gzip tar 28.4 → 39.1 and 64.5 → 119.3 ms; stored-block Zstd tar 18.8 → 29.9 and 58.4 → 162.6 ms | `LENZ_ARCHIVE_PROBE` v1, `ChangeSet::load`, seven alternating process pairs |
+| PostgreSQL syntax check on its own 256 MiB-stack thread | about **1 µs → 30 µs** per check | [section above](#postgresql-parser-on-its-own-stack--2026-11-20) |
+| Folder listing inside Git: explicit excludes, then a second `ls-files -o -i --directory` for `.gitignore` files that ignore themselves | **1.80 → 4.14 ms** per repository level (each submodule or nested repository lists again) | 5,001 tracked files beside an ignored `target/` of 200,000 files and `node_modules/` of 50,000, git 2.56, 15 runs |
+| An SVG comparison keeps its source beside the rendering | load **109.3 → 111.7 ms**; the source line diff then runs after first paint (29.7 ms) | 2.3 MB SVG of 40,000 `<rect>` lines, in-process, seven runs |
+
+**Rejected then:** listing the self-ignoring `.gitignore` files without `--directory` took 63.7 ms on the
+same fixture, because git descends every ignored folder. **Not measured then:** the TUI's background syntax
+parse of SVG source, GPU memory and RSS for the SVG change, frontends for the others.
+
+**Kept: unchanged zip members are not decompressed.** Comparing two zips decompressed and hashed every member
+on both sides. Now, for a same-name pair whose compression method, general-purpose flags, sizes, CRC-32 and
+stored (still compressed) bytes are all equal, both members are left out without being read: the decoder gets
+equal inputs, so they extract to equal content or fail alike. Equality never rests on the CRC-32. Every other
+member, one-sided ones included, is still decompressed (the reader checks its CRC-32) and fingerprinted by
+SHA-256, so renames still pair by content, and a zip repacked at another level still compares by content.
+Header checks still run for every member: names, duplicates, encryption, compression methods this build cannot
+decode, and the 2 GiB unpacked limit, charged with a skipped member's stated size. Tests cover equal size, CRC-32
+and compressed size with different bytes (stored members), equal stored bytes under another flag or method,
+renames beside skipped members, unchanged encrypted and unsupported-method members, and that the stored bytes
+compared are the crate's raw reader's. Fingerprinting also reuses one 64 KiB buffer per listing; zeroing a new
+one per member cost more than hashing a 2 KiB member.
+
+`LENZ_ARCHIVE_PROBE` v2 (adds `repacked.zip`, the same pair with the new side deflated at level 1, so every
+member is decompressed; adds absolute `peak_rss_mib`). Six alternating process pairs in ABBA order, eleven
+loads each after a warm-up, 1-minute load average 2.4–4.4; median of per-process medians (range):
+
+| Case | Before | After | Peak growth per load, MiB |
+| --- | ---: | ---: | --- |
+| zip 5,000 × 2 KiB | 45.20 (44.02–46.43) ms | **4.50** (4.20–4.74) ms | 0.0 → 0.0 |
+| zip 32 × 2 MiB | 111.79 (110.47–116.06) ms | **7.23** (7.07–7.86) ms | 0.0 → 0.0 |
+| repacked zip 5,000 × 2 KiB | 43.34 (42.69–45.22) ms | 42.65 (40.95–44.19) ms | 0.0 → 0.0 |
+| repacked zip 32 × 2 MiB | 134.96 (134.20–138.93) ms | 134.71 (134.57–135.70) ms | 0.0 → 0.0 |
+| gzip tar 5,000 × 2 KiB | 37.80 (37.11–39.53) ms | **34.24** (33.91–34.58) ms | 0.0 → 0.0 |
+| gzip tar 32 × 2 MiB | 115.72 (114.09–118.61) ms | 114.69 (114.00–117.01) ms | 0.0 → 0.0 |
+| Zstd tar 5,000 × 2 KiB | 29.70 (28.46–30.37) ms | **25.59** (25.32–26.71) ms | 0.0 → 0.0 |
+| Zstd tar 32 × 2 MiB | 108.11 (107.28–135.04) ms | 108.36 (107.50–165.80) ms | 127.1 → 127.2 |
+
+Absolute `VmHWM` per load matched within 0.5 MiB except the repacked 5,000-member zip, whose before-load RSS
+differs (43 → 85 MiB) with the process's earlier fixture work; its per-load growth is zero in both.
+
+**Unsuccessful: `io::copy` into the hasher.** Its 8 KiB buffer is not zeroed, so small members got faster
+(gzip tar 5,000 × 2 KiB 37.0 → 34.1 ms), but 2 MiB members slowed: repacked zip 134.5 → 156.0 ms and gzip tar
+114.3 → 144.6 ms (three pairs). The reused 64 KiB buffer keeps the first gain without the second.
+
+**Found and fixed during measurement: both archives read first.** The first candidate read both Sides before
+listing either, also for tars, which held two archives at once: peak growth for the stored-block Zstd tars rose
+0 → 13 and 127 → 192 MiB (absolute `VmHWM` 79 → 90 and 206 → 269 MiB, four pairs). Only a zip pair now holds
+both archives; every other pair lists one Side at a time, as before.
+
+**Trade-offs awaiting the owner's decision.** A zip pair now holds both archives' stored bytes during listing,
+where it held one at a time: up to one more archive of at most 512 MiB. The probe's 3 MB zips show no growth;
+larger zips were not measured. An unchanged member whose stored CRC-32 is wrong is no longer read, so it no
+longer keeps the archive from opening as a folder; a changed one still does. Not covered: frontends (both call
+`ChangeSet::load`), nested archives, the `dist` profile and native macOS. Raw samples, executables and their
+source commits are in ignored `perf-results/zip-compare/`.
