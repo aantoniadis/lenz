@@ -97,10 +97,13 @@ for zip, gzip tar and stored-block Zstd tar, with 5,000 × 2 KiB and 32 × 2 MiB
 cargo test --locked --release -p lenz --no-default-features --lib archive_change_set_release_probe -- --ignored --nocapture
 ```
 
-`LENZ_ARCHIVE_PROBE` version 1 records eleven `ChangeSet::load` wall times per case after one warm-up,
-the per-load RSS growth above the RSS before it (`VmHWM` reset through `/proc/self/clear_refs`, Linux only),
+`LENZ_ARCHIVE_PROBE` version 2 records eleven `ChangeSet::load` wall times per case after one warm-up,
+the per-load RSS growth above the RSS before it and that peak itself (`peak_rss_mib`; `VmHWM` reset through
+`/proc/self/clear_refs`, Linux only),
 and the load average. It excludes frontends, member reads and Folder Summary counts. Compare builds by
-copying each test executable and alternating them.
+copying each test executable and alternating them. Version 2 adds `repacked.zip`: the same zip pair with the
+new side deflated at level 1, so no unchanged member keeps its stored bytes and every member is decompressed
+(the worst case for zip). Version 1's cases are unchanged.
 
 `scripts/code-editor-gui-bench.py` schema 2 drains preceding XDamage events before
 rearming the NonEmpty damage region. Older versions could discard a late paint

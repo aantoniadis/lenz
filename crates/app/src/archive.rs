@@ -884,6 +884,19 @@ mod tests {
         assert!(unpack(Compression::Zstd, &cut, 1 << 20).unwrap_err().contains("truncated zstd skippable frame"));
     }
 
+    /// A zip of `files` deflated at level 1, where [`testing::zip`] uses the default level.
+    fn repacked(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(1));
+        for (path, content) in files {
+            out.start_file(*path, options).unwrap();
+            std::io::Write::write_all(&mut out, content).unwrap();
+        }
+        out.finish().unwrap().into_inner()
+    }
+
     /// Change Set load of two changed archives that differ in one member: many small members, and a few large ones.
     /// `cargo test --release -p lenz --no-default-features --lib archive_change_set_release_probe -- --ignored --nocapture`
     #[test]
@@ -914,23 +927,26 @@ mod tests {
             fn borrow(files: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
                 files.iter().map(|(n, c)| (n.as_str(), c.as_slice())).collect()
             }
-            for ext in ["zip", "tar.gz", "tar.zst"] {
+            // `repacked.zip`: the new side deflated at another level, so no member's stored bytes match
+            for ext in ["zip", "repacked.zip", "tar.gz", "tar.zst"] {
                 let make = |files: &[(&str, &[u8])]| match ext {
                     "zip" => testing::zip(files),
+                    "repacked.zip" => testing::zip(files),
                     "tar.gz" => testing::tar(files, Compression::Gzip),
                     // stored zstd blocks: measures framing and member hashing, not zstd decompression
                     _ => zstd_stored_frame(&testing::tar(files, Compression::None)),
                 };
                 let (left, right) = (d.path().join(format!("{label}-old.{ext}")), d.path().join(format!("{label}-new.{ext}")));
                 std::fs::write(&left, make(&borrow(&old))).unwrap();
-                std::fs::write(&right, make(&borrow(&new))).unwrap();
+                let new_bytes = if ext == "repacked.zip" { repacked(&borrow(&new)) } else { make(&borrow(&new)) };
+                std::fs::write(&right, new_bytes).unwrap();
                 fixtures.push((format!("{label}.{ext}"), count * len, changed.clone(), left, right));
             }
         }
         let mut cases = Vec::new();
         for (case, unpacked, changed, left, right) in fixtures {
             let spec = crate::changeset::Spec::Plain { left: left.clone(), right: right.clone() };
-            let (mut ms, mut peak) = (Vec::new(), Vec::new());
+            let (mut ms, mut peak, mut absolute) = (Vec::new(), Vec::new(), Vec::new());
             for sample in 0..12 {
                 // resets VmHWM to the current RSS, so the peak below is this load's own
                 let _ = std::fs::write("/proc/self/clear_refs", "5");
@@ -945,13 +961,14 @@ mod tests {
                 if sample > 0 {
                     ms.push(elapsed);
                     peak.extend(before.zip(status("VmHWM:")).map(|(before, peak)| peak - before));
+                    absolute.extend(status("VmHWM:"));
                 }
             }
             let bytes = [std::fs::metadata(&left).unwrap().len(), std::fs::metadata(&right).unwrap().len()];
             cases.push(serde_json::json!({"case": case, "archive_bytes": bytes, "unpacked_bytes": unpacked, "load_ms": ms,
-                "peak_rss_growth_mib": peak, "rss_mib": crate::perf::rss_mib()}));
+                "peak_rss_growth_mib": peak, "peak_rss_mib": absolute, "rss_mib": crate::perf::rss_mib()}));
         }
-        println!("LENZ_ARCHIVE_PROBE {}", serde_json::json!({"version": 1, "loadavg": std::fs::read_to_string("/proc/loadavg").ok(), "cases": cases}));
+        println!("LENZ_ARCHIVE_PROBE {}", serde_json::json!({"version": 2, "loadavg": std::fs::read_to_string("/proc/loadavg").ok(), "cases": cases}));
     }
 
 }
