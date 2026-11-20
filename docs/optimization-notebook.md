@@ -2733,9 +2733,24 @@ listing either, also for tars, which held two archives at once: peak growth for 
 0 → 13 and 127 → 192 MiB (absolute `VmHWM` 79 → 90 and 206 → 269 MiB, four pairs). Only a zip pair now holds
 both archives; every other pair lists one Side at a time, as before.
 
-**Trade-offs awaiting the owner's decision.** A zip pair now holds both archives' stored bytes during listing,
-where it held one at a time: up to one more archive of at most 512 MiB. The probe's 3 MB zips show no growth;
-larger zips were not measured. An unchanged member whose stored CRC-32 is wrong is no longer read, so it no
-longer keeps the archive from opening as a folder; a changed one still does. Not covered: frontends (both call
-`ChangeSet::load`), nested archives, the `dist` profile and native macOS. Raw samples, executables and their
-source commits are in ignored `perf-results/zip-compare/`.
+**Owner decisions, and a size threshold.** An unchanged member whose stored CRC-32 is wrong is no longer read in a
+pair, so it no longer keeps the archive from opening as a folder (a changed one still does): accepted as is. Holding
+both archives at once was bounded instead: two zips are paired only while each is at most `MAX_PAIRED_ZIP`
+(64 MiB as stored); a larger pair is listed one archive at a time, decompressing every member, as 0.0.18–0.0.21 did.
+A test lowers the limit to show the one-at-a-time path reads the unchanged member. `LENZ_ARCHIVE_LARGE_PROBE` v1,
+two 200 MiB zips of 100 stored 2 MiB members differing in one, four alternating process pairs, median of per-process
+medians (range):
+
+| Large pair | Load | Peak growth per load | Absolute peak |
+| --- | ---: | ---: | ---: |
+| Paired, both held | 71.0 (63.5–78.0) ms | 398.9 MiB | 408.4 MiB |
+| One at a time (over the limit) | 235.6 (232.2–242.2) ms | 199.1 MiB | 208.6 MiB |
+
+Stored members make the one-at-a-time path's decompression a copy; deflated members of that size would take longer.
+The `LENZ_ARCHIVE_PROBE` v2 cases (all under the limit), four alternating pairs with and without the threshold, stayed
+within run-to-run spread: zip 4.30 → 4.11 and 7.01 → 7.40 ms, repacked zip 41.71 → 41.49 and 134.24 → 135.04 ms,
+tars 33.98 → 33.85, 25.18 → 24.95, 113.91 → 114.50 and 104.92 → 105.82 ms, with overlapping ranges. Not tried:
+keeping a hash of each member's stored bytes so a large pair needs only one archive at a time and decompresses only
+changed members. Not covered: frontends (both call `ChangeSet::load`), nested archives, the `dist` profile and
+native macOS. Raw samples, executables and their source commits are in ignored `perf-results/zip-compare/` and
+`perf-results/zip-threshold/`.

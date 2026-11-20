@@ -29,6 +29,26 @@ pub(crate) const MAX_ARCHIVE: u64 = 512 << 20;
 const MAX_UNPACKED: u64 = 2 << 30;
 /// The largest member read for display.
 const MAX_MEMBER: u64 = 1 << 30;
+/// Two zips each at most this large as stored are listed together, both held in memory at once, so their unchanged
+/// members are never decompressed (see [`changed_zip_members`]). A larger one is listed alone, one archive in memory
+/// at a time, and every member is decompressed, as for tars.
+pub(crate) const MAX_PAIRED_ZIP: u64 = 64 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// [`MAX_PAIRED_ZIP`], lowered by a test to pick the one-at-a-time path with small archives.
+    pub(crate) static PAIRED_ZIP_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(MAX_PAIRED_ZIP) };
+}
+
+/// Whether two zips of these stored sizes are listed together (see [`MAX_PAIRED_ZIP`]).
+pub(crate) fn pairs_zips(sizes: [u64; 2]) -> bool {
+    #[cfg(test)]
+    let limit = PAIRED_ZIP_LIMIT.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let limit = MAX_PAIRED_ZIP;
+    sizes.iter().all(|&size| size <= limit)
+}
+
 /// The read size when fingerprinting members.
 const BUFFER: usize = 64 << 10;
 /// Listing stops past this many members.
@@ -1019,6 +1039,28 @@ mod tests {
     }
 
     #[test]
+    fn zips_over_the_pairing_limit_are_listed_one_at_a_time() {
+        let stored = zip::CompressionMethod::Stored;
+        let old = zip_of(&[("secret", b"key = 1\n", stored), ("README", b"v1\n", stored)]);
+        let new = zip_of(&[("secret", b"key = 1\n", stored), ("README", b"v2\n", stored)]);
+        // the same unchanged member with a wrong CRC-32 on both sides: only the one-at-a-time path reads it
+        let (mut old_bad, mut new_bad) = (old.clone(), new.clone());
+        for zip in [&mut old_bad, &mut new_bad] {
+            let at = zip.windows(8).position(|w| w == b"key = 1\n").unwrap();
+            zip[at + 6] = b'0';
+        }
+        let size = old_bad.len().max(new_bad.len()) as u64;
+        assert!(pairs_zips([size, size]) && !pairs_zips([size, MAX_PAIRED_ZIP + 1]));
+        let (_d, set) = load("zip", &old_bad, &new_bad);
+        assert_eq!(listed(&set), [("README".into(), crate::changeset::Status::Modified)], "paired");
+        PAIRED_ZIP_LIMIT.with(|limit| limit.set(size - 1));
+        assert!(refused("zip", &old_bad, &new_bad).contains("checksum"), "listed alone, every member is read");
+        let (_d, set) = load("zip", &old, &new);
+        assert_eq!(listed(&set), [("README".into(), crate::changeset::Status::Modified)], "and still compared");
+        PAIRED_ZIP_LIMIT.with(|limit| limit.set(MAX_PAIRED_ZIP));
+    }
+
+    #[test]
     fn zip_renames_are_found_beside_unchanged_members() {
         let deflated = zip::CompressionMethod::Deflated;
         let (_d, set) = load("zip", &zip_of(&[("a", b"alpha\n", deflated), ("b", b"beta\n", deflated), ("old", b"moved\n", deflated)]),
@@ -1043,7 +1085,7 @@ mod tests {
             patch_member(zip, "secret", |f| f[2] = 97);
         }
         assert!(refused("zip", &old_unknown, &new_unknown).contains("not supported"));
-        // owner decision pending: an unchanged member whose stored CRC-32 is wrong is no longer read, so it no longer
+        // accepted by the owner: an unchanged member whose stored CRC-32 is wrong is not read in a pair, so it no longer
         // refuses the archive; a changed one still does (see members_are_compared_by_content_not_size_and_crc)
         let (mut old_bad, mut new_bad) = (old.clone(), new.clone());
         for zip in [&mut old_bad, &mut new_bad] {
