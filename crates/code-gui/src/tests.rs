@@ -668,6 +668,8 @@ fn production_quit_all_prepares_both_windows_before_discard_or_explicit_save(cx:
         settle(cx,&b,|v|matches!(v.modal,Some(Modal::StatusDetails {kind:Details::Close,..})));
         assert_eq!(cx.update(|cx|cx.windows().len()),2,"early consent cannot remove its window");
         let mut bv=visual(cx,&b);bv.simulate_keystrokes("end up escape");cx.run_until_parked();
+        // Both windows ask at once, so b's question does not wait for a's background write.
+        if first=="s" {settle(cx,&a,|v|!v.session.state().tab_dirty(v.session.state().active().unwrap().id()));}
         for (i,f) in [&a,&b].into_iter().enumerate() {
             assert_eq!(f.view.read_with(cx,|v,_|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line())),positions[i]);
             assert_eq!(f.view.read_with(cx,|v,_| {let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).unwrap()}),"draft λ\r\n");
