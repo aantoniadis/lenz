@@ -60,7 +60,7 @@ trust](code/providers.md#project-tools-and-folder-trust)).
 The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
 line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.
 Tracked files compare with HEAD (unsaved edits included, so Save keeps the marks), new files say they are new, and
-files outside Git compare with the last save; the status bar and Status details name the baseline. See the
+files outside Git compare with the last save; Status details names the baseline. See the
 [terminal editor guide](code/tui.md) for the cells, the timing and the limits.
 
 Find in the current draft also replaces: both adapters open find with Ctrl+F, Tab moves to the replacement row,

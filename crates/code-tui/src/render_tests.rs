@@ -1109,7 +1109,13 @@ fn editor_gutter_marks_change_letters_in_their_own_colours_against_head() {
     assert_eq!(markers.drawn_version(), Some(app.session.state().current_source().unwrap().key().version), "the drawn blocks describe the draft version shown");
     assert_eq!(markers.baseline().map(code_core::markers::Baseline::kind), Some(BaselineKind::Head));
     assert_eq!(markers.summary().as_deref().map(|s| s.starts_with("vs HEAD (main · ")), Some(true), "{:?}", markers.summary());
-    assert!(lines_of(&draw(&mut app, 80, 12)).iter().any(|l: &String| l.contains("vs HEAD")), "the status bar names the baseline");
+    // The status bar has no baseline cell; Status Details, from a click on the message, names it.
+    assert!(!lines_of(&draw(&mut app, 80, 12)).iter().any(|l: &String| l.contains("vs HEAD")), "no baseline in the status bar");
+    let (_, message) = *app.layout.controls.iter().find(|(id, _)| *id == CommandId::StatusDetails).unwrap();
+    app.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: message.x + 1, row: message.y, modifiers: KeyModifiers::NONE }));
+    assert!(lines_of(&draw(&mut app, 80, 24)).iter().any(|l: &String| l.contains("vs HEAD (main · ")), "Status Details names the baseline");
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\nthree\n");
 }
 

@@ -6485,11 +6485,11 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             v.simulate_resize(size(px(w), px(h)));
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
-                let (a, b, c, sql, markers, _) = r.status_segments();
+                let (a, b, c, sql, _) = r.status_segments();
                 assert_eq!(c.0.left(), px(STATUS_PAD.min(w / 2.0)));
-                assert!(c.0.right() <= a.0.left() && a.0.right() <= sql.0.left() && sql.0.right() <= markers.0.left() && markers.0.right() <= b.0.left());
+                assert!(c.0.right() <= a.0.left() && a.0.right() <= sql.0.left() && sql.0.right() <= b.0.left());
                 assert!(b.0.right() <= px(w));
-                for (bounds, text) in [a, b, c, sql, markers] {
+                for (bounds, text) in [a, b, c, sql] {
                     assert!(lenz_content::wrap::width(&text) as f32 * r.char_w <= f32::from(bounds.size.width) + 0.01);
                 }
                 assert!(r.nav_buttons().iter().all(|b| b.0 >= 0.0 && b.1 <= w));
@@ -7851,7 +7851,12 @@ fn gutter_paints_change_letters_in_their_own_colours_against_head(cx: &mut TestA
     });
     assert_eq!(kind, Some(BaselineKind::Head));
     assert_eq!(summary.as_deref().map(|s| s.starts_with("vs HEAD (main · ")), Some(true), "{summary:?}");
-    assert!(f.view.read_with(&v, |view, _| view.status_markers().1.clone()).contains("vs HEAD"), "the status bar names the baseline");
+    // The status bar has no baseline cell; Status Details names it.
+    let footer = f.view.read_with(&v, |view, _| { let (a, b, c, sql, _) = view.status_segments(); [a.1, b.1, c.1, sql.1].concat() });
+    assert!(!footer.contains("vs HEAD"), "{footer}");
+    v.simulate_keystrokes("shift-f2");
+    assert!(f.view.read_with(&v, |view, _| view.modal_rows()).iter().any(|(row, _)| row.contains("vs HEAD (main · ")), "Status Details names the baseline");
+    v.simulate_keystrokes("escape");
     // Blame and a bookmark take their own gutter places beside the letters.
     f.view.update(&mut v, |view, cx| { view.dispatch(Command::SetAnnotate(true), cx); view.dispatch(Command::ToggleBookmark, cx); });
     settle(cx, &f, |view| view.session().state().active().is_some_and(|t| t.blame_status() == Some(code_core::blame::Status::Ready)));

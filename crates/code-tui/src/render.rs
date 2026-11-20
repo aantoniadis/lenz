@@ -864,32 +864,19 @@ impl App {
             );
             geometry.controls.push((CommandId::SqlDialect, sql_rect));
         }
-        // The open draft's change-marker baseline: which version its letters are compared against.
-        let baseline = self.session.markers_baseline().map(|b| format!(" vs {} ", b.short())).unwrap_or_default();
-        let baseline_width = if save_notice || area.width < 60 { 0 } else { (baseline.width() as u16).min(available.saturating_sub(lsp_width + sql_width) / 4) };
-        let baseline_rect = Rect::new(sql_rect.right(), area.y, baseline_width, 1);
-        if baseline_width > 0 {
-            line(
-                frame.buffer_mut(),
-                baseline_rect,
-                &code_core::chrome::ellipsize(&baseline, baseline_width as usize),
-                style(p.fg, p.status_bg),
-            );
-            geometry.controls.push((CommandId::StatusDetails, baseline_rect));
-        }
         // "Restricted" while the open folder is not trusted (Lenz runs no code from it), in the message's room: a click
         // opens the folder-trust dialog.
         let restricted = self.session.restricted_label().map(|label| format!(" {label} ")).unwrap_or_default();
-        let restricted_width = (restricted.width() as u16).min(results_rect.x.saturating_sub(baseline_rect.right()) / 2);
+        let restricted_width = (restricted.width() as u16).min(results_rect.x.saturating_sub(sql_rect.right()) / 2);
         let restricted_rect = Rect::new(results_rect.x.saturating_sub(restricted_width), area.y, restricted_width, 1);
         if restricted_width > 0 {
             line(frame.buffer_mut(), restricted_rect, &code_core::chrome::ellipsize(&restricted, restricted_width as usize), style(p.error, p.status_bg).add_modifier(Modifier::BOLD));
             geometry.controls.push((CommandId::FolderTrust, restricted_rect));
         }
         let message_rect = Rect::new(
-            baseline_rect.right(),
+            sql_rect.right(),
             area.y,
-            restricted_rect.x.saturating_sub(baseline_rect.right()),
+            restricted_rect.x.saturating_sub(sql_rect.right()),
             1,
         );
         let message = self.session.status_message();

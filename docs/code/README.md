@@ -642,7 +642,7 @@ The gutter also marks the draft's own changes. Left of the line numbers, a line 
 modified-file blue and a line it adds shows **A** in the added-file green; a second cell shows **D** where the draft
 deleted lines just above, with their count in **Status details…**. The letters are the identification, so a terminal
 without colour, or `NO_COLOR`, loses nothing. The baseline is named and never guessed: tracked files are compared
-against **HEAD**'s version of the file (`vs HEAD (main · a1b2c3c)`, in the status bar and in Status details), new and
+against **HEAD**'s version of the file (`vs HEAD (main · a1b2c3c)`, in Status details), new and
 untracked files against nothing — every line is added, labelled `new file (untracked)` or `new file (added to Git)` —
 and files outside Git against the last confirmed save. Unsaved edits count, so saving a tracked file leaves its
 repository markers and only a new HEAD clears them; outside Git, Save becomes the new baseline. The caret's line names

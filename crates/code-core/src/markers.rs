@@ -85,20 +85,12 @@ impl Baseline {
             Self::Saved => BaselineKind::Saved,
         }
     }
-    /// As the status bar and the details name it: `HEAD (main · 1a2b3c4)`, the new file's account, or `last saved`.
+    /// As the status details name it: `HEAD (main · 1a2b3c4)`, the new file's account, or `last saved`.
     pub fn label(&self) -> &str {
         match self {
             Self::Head { label } => label,
             Self::New { label } => label,
             Self::Saved => "last saved",
-        }
-    }
-    /// A narrow status bar's name for it.
-    pub fn short(&self) -> &'static str {
-        match self.kind() {
-            BaselineKind::Head => "HEAD",
-            BaselineKind::New => "new",
-            BaselineKind::Saved => "saved",
         }
     }
 }

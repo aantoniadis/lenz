@@ -84,7 +84,7 @@ only their own untracked status.
 The gutter marks the draft's changes too, left of the line numbers: **M** in the modified-file blue for a line the
 draft modifies and **A** in the added-file green for a line it adds, each identified by its letter rather than its
 colour (`NO_COLOR` loses only the colours); a second cell shows **D** where the draft deleted lines just above the
-line. The baseline is named in the status bar (`vs HEAD`, `vs new`, `vs saved`) and in **Status details…** (Shift+F2,
+line. The baseline is named in **Status details…** (Shift+F2,
 `vs HEAD (main · 1a2b3c3): 2 added, 1 modified`), and the caret's line names its change there
 (`Modified from HEAD (main · 1a2b3c3)`) unless blame annotates that line. Tracked files are compared with HEAD's version — unsaved edits included, so
 Save leaves them — new and untracked files are compared with nothing and say so (`new file (untracked)`, or

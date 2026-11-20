@@ -191,11 +191,6 @@ impl Session {
         self.state().markers(tab.id())?.line_label(line)
     }
 
-    /// The active file's change-marker baseline, named (`HEAD (main · 1a2b3c4)`, a new file, or the last save).
-    pub fn markers_baseline(&self) -> Option<&crate::markers::Baseline> {
-        self.state().active().and_then(|tab| self.state().markers(tab.id()))?.baseline()
-    }
-
     /// The shown draft's baseline and what changed against it, for the status details.
     pub fn markers_details(&self) -> Option<String> {
         let markers = self.state().active().and_then(|tab| self.state().markers(tab.id()))?;
