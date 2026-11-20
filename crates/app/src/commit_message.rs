@@ -209,6 +209,28 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_log_encoding_keeps_the_real_messages() {
+        // Text whose UTF-16LE form is the given ASCII: re-encoded output would read as another commit.
+        let utf16_of = |ascii: &str| -> String {
+            ascii.as_bytes().chunks(2).map(|p| char::from_u32(u32::from(p[0]) | u32::from(*p.get(1).unwrap_or(&b' ')) << 8).unwrap()).collect()
+        };
+        for key in ["i18n.logOutputEncoding", "i18n.commitEncoding"] {
+            let root = repo();
+            let r = root.path();
+            write(r, "f", "a\n"); commit_all(r, "base");
+            write(r, "f", "b\n"); commit_all(r, "first");
+            let other = format!("{}\nOther\n2020-01-01 00:00\nOther subject", "d".repeat(40));
+            git(r, &["commit", "-q", "--allow-empty", "-m", &format!("second a{}z", utf16_of(&other))]);
+            git(r, &["config", key, "UTF-16LE"]);
+            let range = read(r, &Query::Range("HEAD~2..HEAD".into())).unwrap();
+            let shas: Vec<&str> = range.commits.iter().map(|c| c.sha.as_str()).collect();
+            assert_eq!(shas, [head(r, "HEAD"), head(r, "HEAD~1")], "{key}");
+            assert_eq!(range.commits[1].message.trim_end(), "first", "{key}");
+            assert!(range.commits[0].message.starts_with("second a"), "{key}");
+        }
+    }
+
+    #[test]
     fn long_lines_wrap_at_spaces_with_an_indent() {
         let mut out = Vec::new();
         wrap(&mut out, "▾ alpha beta gamma delta", 2, 12, LineKind::Toggle);

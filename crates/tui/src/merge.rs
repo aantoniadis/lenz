@@ -1326,14 +1326,13 @@ fn styled_source(
     use unicode_width::UnicodeWidthStr;
     let mut x = 0;
     let mut out = Vec::new();
-    for (byte, g) in s
-        .trim_end_matches(['\r', '\n'])
-        .grapheme_indices(true)
-        .take(lenz::document::LONG_LINE)
-    {
+    let line = s.trim_end_matches(['\r', '\n']);
+    let cut = lenz::document::displayed_bytes(line);
+    for (byte, g) in line.get(..cut).unwrap_or(line).grapheme_indices(true) {
         let display = if g=="\t"{"    ".into()}else{clean(g)};
         let w = display.width().max(1);
         if x + w > offset + width {
+            x = offset + width; // the pane is full
             break;
         }
         if x >= offset {
@@ -1361,6 +1360,11 @@ fn styled_source(
         }
         x += w;
     }
+    // a cut line ends with how much it leaves out, as in the GUI
+    if x < offset + width && let Some(note) = lenz::document::cut_note(line, cut) {
+        let shown: String = note.chars().skip(offset.saturating_sub(x)).take(offset + width - x.max(offset)).collect();
+        out.push(Span::styled(shown, base.fg(crate::chrome::color(palette.dim))));
+    }
     out
 }
 fn clipped(s: &str, offset: usize, width: usize) -> String {
@@ -1368,20 +1372,22 @@ fn clipped(s: &str, offset: usize, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let mut x = 0;
     let mut out = String::new();
-    for g in s
-        .trim_end_matches(['\r', '\n'])
-        .graphemes(true)
-        .take(lenz::document::LONG_LINE)
-    {
+    let line = s.trim_end_matches(['\r', '\n']);
+    let cut = lenz::document::displayed_bytes(line);
+    for g in line.get(..cut).unwrap_or(line).graphemes(true) {
         let g = clean(g);
         let w = g.width();
         if x + w > offset + width {
+            x = offset + width; // the pane is full
             break;
         }
         if x >= offset {
             out.push_str(&g);
         }
         x += w;
+    }
+    if x < offset + width && let Some(note) = lenz::document::cut_note(line, cut) {
+        out.extend(note.chars().skip(offset.saturating_sub(x)).take(offset + width - x.max(offset)));
     }
     out
 }
@@ -1412,6 +1418,20 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Modifier};
+
+    #[test]
+    fn a_cut_line_ends_with_its_note_in_every_merge_pane() {
+        let long = format!("{}changed\n", "x".repeat(lenz::document::LONG_LINE));
+        let note = "  … 7 more characters";
+        let offset = lenz::document::LONG_LINE - 10;
+        let palette = crate::chrome::palette();
+        let spans: String = styled_source(palette, &long, offset, 40, Style::default(), &[], &[], None, &[]).iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(spans, format!("{}{note}", "x".repeat(10)));
+        assert_eq!(clipped(&long, offset, 40), format!("{}{note}", "x".repeat(10)));
+        assert_eq!(clipped(&long, offset, 15), format!("{}  … 7", "x".repeat(10)), "cut to the pane");
+        assert_eq!(clipped(&long, 0, 5), "xxxxx", "a full pane shows no note");
+        assert_eq!(clipped("short\n", 0, 40), "short");
+    }
     fn key(app: &mut Merger, code: KeyCode, mods: KeyModifiers) {
         app.handle(Event::Key(KeyEvent::new(code, mods)));
     }

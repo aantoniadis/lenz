@@ -8,7 +8,8 @@ pub(super) fn line_columns(line:&str)->usize{
     text.width()+4*text.bytes().filter(|b|*b==b'\t').count()
 }
 pub(super) fn columns(lines: &[String]) -> usize {
-    lines.iter().map(|line|line_columns(line)).max().unwrap_or(0)
+    // a cut line's "… N more characters" scrolls into view too
+    lines.iter().map(|line|line_columns(line)+lenz_content::display::cut_note_columns(line)).max().unwrap_or(0)
 }
 impl Viewer {
     fn side_max(&mut self, side: Side) -> f32 {
@@ -40,5 +41,17 @@ impl Viewer {
     /// After a switch out of Independent, the Sides take the focused one's position.
     pub(super) fn sync_horizontal(&mut self) {
         if self.shared_horizontal()&&self.hscroll[0]!=self.hscroll[1]{let side=self.pane_side(self.diff_focus);self.clamp_horizontal(side);}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cut_line_scrolls_as_far_as_its_note() {
+        let long = format!("{}changed", "x".repeat(LONG_LINE));
+        assert_eq!(columns(&[long, "short".into()]), LONG_LINE + "  … 7 more characters".chars().count());
+        assert_eq!(columns(&["x".repeat(LONG_LINE)]), LONG_LINE);
     }
 }

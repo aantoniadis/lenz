@@ -95,7 +95,7 @@ impl PreparedDocument {
 
 /// Sides bigger than this ask before they're read and diffed.
 pub const LARGE: u64 = 20 << 20;
-pub use lenz_content::display::{LONG_LINE, MAX_MARKS, cap_marks, hides_text, one_line, show_bidi, shows_mark};
+pub use lenz_content::display::{LONG_LINE, MAX_MARKS, cap_marks, cut_note, cut_note_columns, displayed_bytes, hides_text, one_line, show_bidi, shows_mark};
 
 pub(crate) enum ReadSides { Large(u64), Bytes([SideBytes; 2]) }
 

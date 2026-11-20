@@ -47,6 +47,7 @@ fn rich_source(palette:&lenz::theme::Palette,buf:&mut Buffer,area:Rect,text:&str
     let Decorations{inline,inline_color,hits,syntax,selection,caret}=decorations;
     if area.width == 0 { return; }
     let limit = lenz::document::LONG_LINE;
+    let full = text;
     let end = if text.len() <= limit { text.len() } else { text.char_indices().nth(limit).map_or(text.len(), |(i, _)| i) };
     let text = &text[..end];
     let mut column = 0;
@@ -74,6 +75,14 @@ fn rich_source(palette:&lenz::theme::Palette,buf:&mut Buffer,area:Rect,text:&str
     }
     if caret == Some(text.len()) && column >= offset && column < offset + usize::from(area.width) {
         buf.set_string(area.x + (column - offset) as u16, area.y, "▏", style.fg(color(palette.accent)));
+    }
+    // a cut line ends with how much it leaves out, as in the GUI
+    if column < offset + usize::from(area.width) && let Some(note) = lenz::document::cut_note(full, end) {
+        for ch in note.chars() {
+            if column >= offset + usize::from(area.width) { break; }
+            if column >= offset { buf.set_string(area.x + (column - offset) as u16, area.y, ch.to_string(), style.fg(color(palette.dim))); }
+            column += 1;
+        }
     }
 }
 
@@ -382,7 +391,7 @@ pub(crate) fn source_width(lines:&[String])->usize{
         if text.is_ascii(){let text=&text[..text.len().min(lenz::document::LONG_LINE)];return text.len()+3*text.bytes().filter(|b|*b==b'\t').count();}
         let end=text.char_indices().nth(lenz::document::LONG_LINE).map_or(text.len(),|(i,_)|i);
         text[..end].graphemes(true).map(|g|if g=="\t"{4}else if g.chars().any(lenz::document::hides_text){1}else{g.width().max(1)}).sum()
-    }).max().unwrap_or(0)
+    }).zip(lines).map(|(width,text)|width+lenz::document::cut_note_columns(text)).max().unwrap_or(0)
 }
 
 
@@ -472,6 +481,21 @@ mod tests {
                 assert!(!buf[(x,0)].modifier.contains(Modifier::UNDERLINED));
             }
         }
+    }
+
+    #[test]
+    fn a_cut_line_ends_with_its_note_and_scrolls_as_far_as_it() {
+        let long = format!("{}changed", "x".repeat(lenz::document::LONG_LINE));
+        let note = "  … 7 more characters";
+        let widest = source_width(std::slice::from_ref(&long));
+        assert_eq!(widest, lenz::document::LONG_LINE + note.chars().count());
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buffer = Buffer::empty(area);
+        let palette = crate::chrome::palette();
+        source(palette, &mut buffer, area, &long, widest - 30, base(palette), &[], &[]);
+        let row: String = (0..30).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(row.ends_with(note), "{row:?}");
+        assert!(row.starts_with("xxxxxxxxx"), "{row:?}");
     }
 
     #[test]

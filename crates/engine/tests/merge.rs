@@ -261,3 +261,34 @@ fn merge_holds_intellijs_invariants_on_random_texts() {
     }
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures[..failures.len().min(10)].join("\n"));
 }
+
+#[test]
+fn an_insertion_that_slides_down_to_the_other_sides_change_is_a_conflict() {
+    use MergeKind::*;
+    let d = WhitespaceMode::Default;
+    let base = "alpha line\n\nbeta line\ndelta line\n";
+    // Theirs inserts a copy of the blank and beta lines, which could sit just before Ours' change as well
+    let t9 = types("alpha line\n\nbeta line\ndelta CHANGED\n", base, "alpha line\n\nbeta line\n\nbeta line\ndelta line\n", d);
+    assert!(t9.contains(&(Conflict, "both")), "{t9:?}");
+    let mirrored = types("alpha line\n\nbeta line\n\nbeta line\ndelta line\n", base, "alpha line\n\nbeta line\ndelta CHANGED\n", d);
+    assert!(mirrored.contains(&(Conflict, "both")), "{mirrored:?}");
+    let blank = types("alpha line\nOURS BLANK\nbeta line\ndelta line\n", base, "alpha line\n\nbeta line\n\nbeta line\ndelta line\n", d);
+    assert!(blank.contains(&(Conflict, "both")), "{blank:?}");
+    // with a real conflict elsewhere in the same file, both stay conflicts
+    let both = types("l1\nL2\nl3\nl4\nalpha line\n\nbeta line\ndelta CHANGED\n", "l1\nl2\nl3\nl4\nalpha line\n\nbeta line\ndelta line\n",
+        "l1\nl2\nL3\nl4\nalpha line\n\nbeta line\n\nbeta line\ndelta line\n", d);
+    assert_eq!(both.iter().filter(|t| **t == (Conflict, "both")).count(), 2, "{both:?}");
+    // adjacent edits conflict, the same change on both sides and edits a line apart that cannot slide do not
+    assert_eq!(types("l1\nL2\nl3\nl4\n", "l1\nl2\nl3\nl4\n", "l1\nl2\nL3\nl4\n", d), [(Conflict, "both")]);
+    assert_eq!(types("l1\nX\nl3\n", "l1\nl2\nl3\n", "l1\nX\nl3\n", d), [(Modified, "both")]);
+    assert_eq!(types("l1\nl3\n", "l1\nl2\nl3\n", "l1\nL2\nl3\n", d), [(Conflict, "both")]);
+    assert_eq!(types("a\nB\nc\nd\n", "a\nb\nc\nd\n", "a\nb\nc\nD\n", d), [(Modified, "left"), (Modified, "right")]);
+    let repeated = types("line one\nshared\nline two\nshared\nline three\nshared\n", "line one\nshared\nline two\nshared\nline three\n",
+        "line one\nline two\nshared\nline three\n", d);
+    assert!(!repeated.iter().any(|(kind, _)| *kind == Conflict), "{repeated:?}");
+    // a deletion placed after the run, as git places it too, stays apart (git merges these cleanly)
+    assert!(!types("alpha2\n\n\nbeta\n", "alpha\n\n\nbeta\n", "alpha\n\nbeta\n", d).iter().any(|(k, _)| *k == Conflict));
+    assert!(!types("fn a2\n}\n}\nfn b\n", "fn a\n}\n}\nfn b\n", "fn a\n}\nfn b\n", d).iter().any(|(k, _)| *k == Conflict));
+    // two edits on one side never conflict, slid or not
+    assert_eq!(types("x\n\nb\n\nb\nY\n", "x\n\nb\ny\n", "x\n\nb\ny\n", d).iter().filter(|(k, _)| *k == Conflict).count(), 0);
+}

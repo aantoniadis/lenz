@@ -8415,6 +8415,29 @@ fn gui_the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restri
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {}\n");
 }
 
+/// Another window answering for the folder (its save to providers.json) closes this window's open dialog, which can
+/// no longer overwrite that answer.
+#[gpui::test]
+fn gui_the_folder_trust_dialog_closes_when_another_window_answers(cx: &mut TestAppContext) {
+    use code_core::semantics::provider::Trust;
+    let f = untrusted_fixture(cx, None, &[]);
+    let root = f.dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, |r| r.session().state().project().is_some());
+    f.view.update(cx, |v, cx| v.dispatch_for_test(Command::OpenFolderTrust, cx));
+    let trust_open = |r: &ReaderView| matches!(r.modal, Some(Modal::StatusDetails { kind: Details::Trust, .. }));
+    assert!(f.view.read_with(cx, |r, _| trust_open(r)));
+    let providers = f.dir.path().join("config/lenz-code/providers.json");
+    let mut settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&providers).unwrap()).unwrap();
+    settings["declined"] = serde_json::json!([std::fs::canonicalize(&root).unwrap()]);
+    std::fs::write(&providers, settings.to_string()).unwrap();
+    f.view.update(cx, |v, cx| v.dispatch_for_test(Command::Recheck, cx));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| !trust_open(r) && r.session().folder_trust() == Some(Trust::Declined)));
+}
+
 /// Alt+T in the GUI dialog trusts; Alt+P trusts the folder holding the open one. Tab (or an arrow) moves the focus to
 /// a choice and Enter takes it, as in the terminal.
 #[gpui::test]

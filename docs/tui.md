@@ -193,6 +193,7 @@ Folder headings in Files collapse and expand: click the ▾/▸ arrow (the headi
 - Callouts, `==highlights==`, tags, links, footnotes, properties and done tasks use theme colors and styles (see the guide).
 - Local images are decoded in the background and drawn at most 20 rows tall: as real pixels through kitty graphics Unicode placeholders in kitty and Ghostty (not inside tmux), as half-block cells elsewhere. `LENZ_IMAGES=cells|kitty` overrides detection (`sixel` also selects cells here). A missing or unreadable image keeps its placeholder text.
 - Lenz Code's terminal editor edits Markdown source with a preview beside it; see [its Markdown section](code/README.md#markdown).
+- A line over 10,000 characters is cut there in every text pane, Merge View panes included, and ends with `… N more characters`, as in the GUI; sideways scrolling reaches that note, so a change past the cut still shows where it is.
 - Three-way merge panes keep their plain rendering. PR conversations share the Markdown file parser and terminal text styles; the GUI also reuses its reading fonts and inline styling in a 30% wider column, formatted in the background. PR tables keep compact text separators and images remain linked placeholders; the timeline does not offer the Preview's image or callout controls. The PR wheel moves one row per notch; the GUI accumulates small trackpad movements instead of treating every event as three rows.
 
 ### Themes and icons

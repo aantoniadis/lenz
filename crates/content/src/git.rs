@@ -32,6 +32,9 @@ pub fn command(cwd: &Path) -> Result<Command, String> {
     }
     // Hooks run only for what the user asked for ([`command_as_user`]); signature checks run `gpg.program`.
     cmd.args(["-c", "core.hooksPath=/dev/null", "-c", "log.showSignature=false"]);
+    // Formatted output (`--format`, `for-each-ref`) is read as UTF-8; a repository's `i18n.logOutputEncoding` or
+    // `i18n.commitEncoding` would re-encode it, and the record framing with it.
+    cmd.args(["-c", "i18n.logOutputEncoding=UTF-8"]);
     for setting in &untrusted.args {
         cmd.args(["-c", setting]);
     }

@@ -6385,7 +6385,12 @@ impl Session {
     /// Folder trust changed in another window: its servers stop and are chosen again, as after this window's own answer.
     /// Only the settings file's time and size are checked (never while this window's own save is being written).
     fn trust_changed_elsewhere(&mut self) -> bool {
+        let asked = self.state.trust_prompt.as_ref().map(|p| (p.real.clone(), self.state.semantics.settings().trust(&p.real)));
         if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || !self.state.semantics.settings_changed() { return false; }
+        // An open dialog the other window's answer settled closes: answering it here would overwrite that answer.
+        if let Some((real, was)) = asked && self.state.semantics.settings().trust(&real) != was {
+            self.state.trust_prompt = None;
+        }
         self.state.asking = None;
         self.cancel_semantic_analysis();
         self.synced = 0;

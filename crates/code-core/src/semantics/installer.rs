@@ -105,7 +105,9 @@ pub fn node_package(provider: &str) -> Option<&'static str> {
     })
 }
 
-fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
+/// The preview names each word so it pastes into the user's shell as one word, fish included (it is shown, never run:
+/// the installer runs its argv directly).
+fn quote(value: &str) -> String { lenz_content::open::shell_word(value) }
 
 /// Stream a bounded amount of output while draining both pipes. Cancellation kills the complete owned group.
 fn process(program: &Path, args: &[String], env: &[(String,String)], dir: &Path, cancel: &AtomicBool, timeout: Duration, output: &mut dyn FnMut(&str)) -> Result<(), String> {
@@ -214,4 +216,15 @@ pub fn persist(plan: &Plan, file: &Path, expected: &Settings, cancel: &AtomicBoo
         if plan.provider == "pyright" && !provider.contains_key("node") { provider.insert("node".into(), serde_json::json!(plan.runtime)); }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn preview_words_paste_as_one_word_in_posix_shells_and_fish() {
+        // fish reads `\\` inside single quotes as one backslash: a path ending in one would join the next word
+        assert_eq!(super::quote(r"C:\tools\"), r"'C:'\\'tools'\\''");
+        assert_eq!(super::quote("it's"), r"'it'\''s'");
+        assert_eq!(super::quote("plain"), "'plain'");
+    }
 }

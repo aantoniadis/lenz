@@ -78,7 +78,44 @@ impl R3 {
 /// ComparisonManager.mergeLines + MergeRangeUtil.getLineMergeType. Lines as from [`crate::split_lines`].
 pub fn merge_lines(left: &[&str], base: &[&str], right: &[&str], options: &MergeOptions) -> Vec<MergeBlock> {
     let policy = crate::policy(options.whitespace);
-    line_ranges(left, base, right, policy, true).iter().map(|&m| typed(left, base, right, m, policy)).collect()
+    join_slidable(left, base, right, line_ranges(left, base, right, policy, true)).iter().map(|&m| typed(left, base, right, m, policy)).collect()
+}
+
+/// Joins two ranges, an equal run apart, when the first is a single Side's insertion or deletion that could equally
+/// sit after the run (its lines repeat across it), right before the second, which changes the other Side. The diff
+/// placed it higher; git places it as low as it goes, sees changes that touch, and stops on a conflict.
+fn join_slidable(left: &[&str], base: &[&str], right: &[&str], ranges: Vec<R3>) -> Vec<R3> {
+    let sides = |r: &R3| [left.get(r.s1..r.e1) != base.get(r.s2..r.e2), right.get(r.s3..r.e3) != base.get(r.s2..r.e2)];
+    // the lines one Side's insertion or deletion moves, when that is all `r` changes
+    let moved = |r: &R3| -> Option<(usize, &[&str])> {
+        let (b, l, rt) = (base.get(r.s2..r.e2)?, left.get(r.s1..r.e1)?, right.get(r.s3..r.e3)?);
+        match sides(r) {
+            [true, false] if b.is_empty() || l.is_empty() => Some((0, if b.is_empty() { l } else { b })),
+            [false, true] if b.is_empty() || rt.is_empty() => Some((1, if b.is_empty() { rt } else { b })),
+            _ => None,
+        }
+    };
+    // lines `lines` can slide down across `run`, the run following them, line by line
+    let slides = |lines: &[&str], run: &[&str]| {
+        let n = lines.len();
+        let all: Vec<&str> = lines.iter().chain(run).copied().collect();
+        (0..run.len()).all(|k| all.get(k) == all.get(k + n))
+    };
+    let mut out: Vec<R3> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        if let Some(last) = out.last_mut()
+            && let Some(run) = base.get(last.e2..r.s2)
+            && !run.is_empty()
+        {
+            let other = sides(&r);
+            if moved(last).is_some_and(|(side, lines)| other[1 - side] && slides(lines, run)) {
+                (last.e1, last.e2, last.e3) = (r.e1, r.e2, r.e3);
+                continue;
+            }
+        }
+        out.push(r);
+    }
+    out
 }
 
 /// ByLineRt.merge (`keep_ignored`) or ByLineRt.compare for three sides: base→left and base→right line diffs zipped.

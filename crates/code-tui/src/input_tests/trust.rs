@@ -105,6 +105,29 @@ fn the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restricted
 
 /// A terminal without the kitty keyboard protocol sends Alt+T as Escape then T, and a quick Escape then T (one SSH
 /// packet) arrives the same way: neither trusts. Escape keeps the folder restricted and the letter goes to the editor;
+/// Another window answering for the folder closes this window's open dialog, which can no longer overwrite that
+/// answer.
+#[test]
+fn the_folder_trust_dialog_closes_when_another_window_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut a, _file, marker) = restricted_app(dir.path());
+    a.dispatch(Command::OpenFolderTrust);
+    draw(&mut a, 100, 24);
+    assert!(trust_open(&a));
+    let mut other = App::with_text_input(config(dir.path()), Some(dir.path().join("project")), true);
+    settle(&mut other, |o| o.session.state().project().is_some());
+    other.dispatch(Command::OpenFolderTrust);
+    other.dispatch(Command::TrustChoice(code_core::session::TrustChoice::StayRestricted));
+    let saved = config(dir.path()).providers;
+    settle(&mut other, |_| std::fs::read_to_string(&saved).is_ok_and(|s| s.contains("declined")));
+    // Coming back to the window rechecks; so does its idle tick.
+    a.dispatch(Command::Recheck);
+    draw(&mut a, 100, 24);
+    assert!(!trust_open(&a), "{:?}", a.session.trust_text());
+    assert_eq!(a.session.folder_trust(), Some(Trust::Declined));
+    assert!(!marker.exists());
+}
+
 /// Enter alone stays restricted, as does Enter after any other input than Tab; Tab to a Trust button and Enter trusts.
 #[test]
 fn the_folder_trust_dialog_never_trusts_on_escape_then_a_letter() {

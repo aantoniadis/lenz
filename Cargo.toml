@@ -32,6 +32,8 @@ async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 # Zed patches khronos-egl (wgpu's EGL loader) from v1.26.
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+# The Ruby grammar's scanner fix for heredoc serialization (upstream master after 0.23.1, not yet on crates.io).
+tree-sitter-ruby = { git = "https://github.com/tree-sitter/tree-sitter-ruby", rev = "ad907a69da0c8a4f7a943a7fe012712208da6dee" }
 
 # Keep XKB Escape cancellation from committing preedit before the application sees the key.
 # This is the Linux crate from the same GPUI tag, with the small transport fix documented beside it.

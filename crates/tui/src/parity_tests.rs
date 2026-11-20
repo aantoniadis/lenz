@@ -379,6 +379,24 @@ fn tui_user_flow_merge_replay() {
 }
 
 #[test]
+fn tui_merge_opens_a_change_git_stops_on_as_a_conflict() {
+    let dir=tempfile::tempdir().unwrap();
+    for (name,text) in [("base","alpha line\n\nbeta line\ndelta line\n"),("ours","alpha line\n\nbeta line\ndelta CHANGED\n"),
+        ("theirs","alpha line\n\nbeta line\n\nbeta line\ndelta line\n")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let req=cli::parse(&["merge","base","ours","theirs","result"].map(str::to_owned),dir.path()).unwrap();
+    let mut app=crate::merge::Merger::open(req,dir.path().into());
+    let deadline=Instant::now()+Duration::from_secs(10);
+    while app.busy(){app.poll();assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));}
+    let mut terminal=Terminal::new(TestBackend::new(120,36)).unwrap();
+    terminal.draw(|f|app.render(f)).unwrap();
+    let shown=screen(terminal.backend().buffer());
+    assert!(shown.contains("1 conflict left"),"{shown}");
+    assert!(!dir.path().join("result").exists(),"opening writes nothing");
+}
+
+#[test]
 fn tui_whitespace_keeps_repeated_conflict_choices_separate() {
     use lenz::conflict_session::FileView;
     let dir=tempfile::tempdir().unwrap();

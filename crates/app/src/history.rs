@@ -1003,6 +1003,28 @@ mod tests {
         ]);
     }
 
+    #[test]
+    fn a_repository_log_encoding_keeps_the_real_commits() {
+        // Text whose UTF-16LE form is the given ASCII: re-encoded output would read as other records.
+        let utf16_of = |ascii: &str| -> String {
+            ascii.as_bytes().chunks(2).map(|p| char::from_u32(u32::from(p[0]) | u32::from(*p.get(1).unwrap_or(&b' ')) << 8).unwrap()).collect()
+        };
+        for key in ["i18n.logOutputEncoding", "i18n.commitEncoding"] {
+            let dir = repo();
+            let d = dir.path();
+            write(d, "f", "1\n");
+            commit_all(d, "first");
+            let other = format!("{} {}\nOther\no@example.invalid\n1577836800 2020-01-01 00:00:00 +0000\nOther subject", "d".repeat(40), "c".repeat(40));
+            git(d, &["commit", "-q", "--allow-empty", "-m", &format!("second a{}z", utf16_of(&other))]);
+            git(d, &["config", key, "UTF-16LE"]);
+            let log = collect(stream(d, &Branches::All).unwrap()).unwrap();
+            let ids: Vec<String> = (0..log.len()).map(|r| log.id(r)).collect();
+            assert_eq!(ids, [git(d, &["rev-parse", "HEAD"]).trim(), git(d, &["rev-parse", "HEAD~1"]).trim()], "{key}");
+            assert!(log.subject(0).starts_with("second a"), "{key}");
+            assert_eq!(log.author(1), ("t", "t@t"), "{key}");
+        }
+    }
+
     /// Receive until `n` commits arrived, failing if more come or the stream ends first.
     fn take(stream: &Stream, n: usize) -> usize {
         let mut got = 0;

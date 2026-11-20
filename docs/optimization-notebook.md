@@ -2643,3 +2643,25 @@ unchanged. Five worst-case documents at the bound (`+1`×131,000, `::int`×52,00
 `||1`×87,000), checked from a 2 MiB thread, complete in 0.11 s with a 106–108 MiB process peak, released
 when the parser thread ends; before the change each aborted the process. Not measured: the `dist` profile,
 native macOS, and first feedback through the full session.
+
+## Syntax parse limits and grammar updates — 2026-11-20
+
+Highlighting now stops a parse and its highlight queries after 10 s and shows that document as plain text, with a
+limited syntax note (Lenz Code's Problems lists it); query cursors keep at most 1,024 in-progress matches. The time
+check runs in tree-sitter's parse and query progress callbacks, which also poll for obsolete work. Release
+`highlight::tests::perf` before the change (tree-sitter 0.27.1, no limits): 100k-line Rust parse and highlight
+272/281/272 ms, parse with folds and 11,112 declarations 387/383/386 ms. With tree-sitter 0.27.2, three alternating
+rounds with and without the query progress callbacks: parse and highlight 285/280/282 vs 281/274/281 ms, parse with
+folds and declarations 389/402/392 vs 387/382/380 ms (about +10 ms, 3%, on a background parse; the parse callback
+alone measured no change). Retained highlights 5.2 MiB throughout. Release runs of single-line inputs that take far
+longer to highlight in full return plain text 10.0–10.2 s after the parse starts.
+
+tree-sitter-sequel 0.3.12 and 0.3.13 (which fix a scanner leak across serialization) nearly double the SQL
+grammar's parse table (17,329 → 32,966 states): the stripped release `lenz` grew from 69,088,160 to 80,021,536
+bytes, over the 80,000,000-byte gate in `scripts/ci-local.sh`. The update is not taken for now. tree-sitter-ruby is taken from upstream (0.23.1 plus its heredoc serialization fix)
+(its size effect was not measured separately; the 69,088,160 bytes above include it).
+
+The Merge View now joins a one-sided insertion or deletion with the other side's change when repeated lines would
+let it sit right next to that change (git conflicts there). Engine bench `merge-100k`, two alternating rounds on the
+same machine, with and without the join: Default 63.5/65.2 vs 63.5/63.8 ms, Ignore 79.5/79.4 vs 79.2/79.2 ms
+(medians of 11). No measurable cost.

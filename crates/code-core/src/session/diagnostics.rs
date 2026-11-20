@@ -289,3 +289,17 @@ impl State {
         self.semantics.settings().initialization(provider, root).get("shell")?.as_str().map(str::to_owned)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_syntax_limit_is_listed_as_information_at_the_files_start() {
+        let decoded = lenz_content::encoding::Decoded { text: "fn main() {}\n".into(), encoding: "UTF-8", had_bom: false, lossy: false, hides_ascii: false };
+        let doc = crate::document::Document::from_decoded("main.rs".into(), 1, decoded);
+        let limit = lenz_content::highlight::SyntaxError { range: 0..0, message: "Syntax limit: shown without highlighting".into(), limited: true };
+        let found = super::syntax_diagnostics(&doc, vec![limit]);
+        assert_eq!(found.items.len(), 1);
+        assert_eq!((found.items[0].range.clone(), found.items[0].severity), (0..0, crate::semantics::diagnostics::Severity::Information));
+        assert!(found.items[0].message.starts_with("Syntax limit"));
+    }
+}

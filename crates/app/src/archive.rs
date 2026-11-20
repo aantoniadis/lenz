@@ -290,6 +290,12 @@ fn each_tar(
         if kind.is_pax_global_extensions() {
             continue;
         }
+        // GNU tar and bsdtar give these no data and read the next block as a header; the tar crate skips `size` bytes
+        let no_data = kind.is_dir() || kind.is_symlink() || kind.is_hard_link() || kind.is_character_special()
+            || kind.is_block_special() || kind.is_fifo();
+        if no_data && entry.size() != 0 {
+            return Err(format!("the archive holds data on a {:?} entry, which extractors read as more members", kind.as_byte() as char));
+        }
         let path = entry.path_bytes();
         let path = std::str::from_utf8(&path).map_err(|_| "non-UTF-8 archive member paths are unsupported".to_string())?;
         let Some(name) = normalize(path) else {
@@ -354,6 +360,10 @@ fn one_name(entry: &mut tar::Entry<impl Read>, kind: tar::EntryType) -> Result<(
         match key {
             b"path" => paths.push(field.value_bytes().to_vec()),
             b"linkpath" => links.push(field.value_bytes().to_vec()),
+            // the tar crate ignores a size it cannot parse, bsdtar reads its leading digits
+            b"size" if field.value().ok().filter(|v| v.bytes().all(|b| b.is_ascii_digit())).and_then(|v| v.parse::<u64>().ok()).is_none() => {
+                return conflict("a PAX size is not a plain number");
+            }
             b"size" => sizes += 1,
             _ => {}
         }
@@ -367,14 +377,15 @@ fn one_name(entry: &mut tar::Entry<impl Read>, kind: tar::EntryType) -> Result<(
     Ok(())
 }
 
-/// `name` relative and `/`-separated, without empty or `.` parts; `None` for one that climbs out with `..` or names
-/// nothing.
+/// `name` relative and `/`-separated, without empty or `.` parts; `None` for one that climbs out with `..`, names
+/// nothing, or holds a NUL (extractors end the name there).
 fn normalize(name: &str) -> Option<String> {
     let mut parts = Vec::new();
     for part in name.split('/') {
         match part {
             "" | "." => {}
             ".." => return None,
+            part if part.contains('\0') => return None,
             part => parts.push(part),
         }
     }
@@ -753,6 +764,66 @@ mod tests {
             let new = testing::zip(&[("install.sh", b"echo good\n"), (name, b"echo PWNED\n")]);
             assert!(refused("zip", &old, &new).contains(reason), "{name}");
         }
+    }
+
+    /// A member's header and content blocks, without the end blocks: placed inside another entry's data.
+    fn hidden_member() -> Vec<u8> {
+        let mut block = raw_tar(vec![(header(tar::Header::new_ustar, "hook.sh", b'0'), b"echo PWNED\n".to_vec())]);
+        block.truncate(block.len() - 1024);
+        block
+    }
+
+    #[test]
+    fn data_on_an_entry_that_extractors_give_none_is_refused() {
+        let ustar = tar::Header::new_ustar;
+        let base = || (header(ustar, "README", b'0'), b"v1\n".to_vec());
+        let old = raw_tar(vec![base()]);
+        // GNU tar and bsdtar read the block after these headers as the next header
+        for (name, kind) in [("dir/", b'5'), ("link", b'2'), ("hard", b'1'), ("tty", b'3'), ("disk", b'4'), ("pipe", b'6')] {
+            let mut entry = header(ustar, name, kind);
+            if matches!(kind, b'1' | b'2') {
+                entry.set_link_name("README").unwrap();
+            }
+            let new = raw_tar(vec![base(), (entry, hidden_member())]);
+            assert!(refused("tar", &old, &new).contains("data on a"), "{}", kind as char);
+        }
+        // the same through a PAX size, the header's own size zero
+        let mut new = raw_tar(vec![base(), (header(ustar, "PaxHeaders/x", b'x'), pax(&[("size", "1024")])), (header(ustar, "dir/", b'5'), Vec::new())]);
+        new.truncate(new.len() - 1024);
+        new.extend(hidden_member());
+        new.extend([0; 1024]);
+        assert!(refused("tar", &old, &new).contains("data on a"));
+    }
+
+    #[test]
+    fn a_pax_size_that_is_not_a_plain_number_is_refused() {
+        let ustar = tar::Header::new_ustar;
+        for size in ["20x", "+11", "", " 11", "11 ", "-0", "0x11", "99999999999999999999999"] {
+            let tar = raw_tar(vec![(header(ustar, "PaxHeaders/x", b'x'), pax(&[("size", size)])), (header(ustar, "notes.txt", b'0'), b"echo EVIL\n".to_vec())]);
+            let error = members(Kind::Tar(Compression::None), &tar).unwrap_err();
+            assert!(error.contains("headers disagree"), "{size:?}: {error}");
+            refused("tar", &good(), &tar);
+        }
+        let plain = raw_tar(vec![(header(ustar, "PaxHeaders/x", b'x'), pax(&[("size", "10")])), (header(ustar, "notes.txt", b'0'), b"echo good\n".to_vec())]);
+        assert_eq!(members(Kind::Tar(Compression::None), &plain).unwrap()["notes.txt"], Fingerprint::of(b"echo good\n"));
+    }
+
+    #[test]
+    fn a_member_name_with_a_nul_is_refused() {
+        let ustar = tar::Header::new_ustar;
+        let member = || (header(ustar, "notes.txt", b'0'), b"echo EVIL\n".to_vec());
+        let cases = [
+            vec![(header(ustar, "PaxHeaders/x", b'x'), pax(&[("path", "install.sh\0")])), member()],
+            vec![(header(tar::Header::new_gnu, "././@LongLink", b'L'), b"install.sh\0\0".to_vec()), member()],
+        ];
+        for entries in cases {
+            let mut all = vec![(header(ustar, "install.sh", b'0'), b"echo good\n".to_vec())];
+            all.extend(entries);
+            assert!(refused("tar", &good(), &raw_tar(all)).contains("no path inside the archive"));
+        }
+        assert_eq!(normalize("a/b\0"), None);
+        let zip = testing::zip(&[("install.sh", b"echo good\n"), ("install.sh\0", b"echo EVIL\n")]);
+        assert!(refused("zip", &testing::zip(&[("install.sh", b"echo good\n")]), &zip).contains("no path inside the archive"));
     }
 
     #[test]

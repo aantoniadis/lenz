@@ -122,6 +122,22 @@ fn gui_whitespace_keeps_repeated_conflict_choices_separate(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn gui_merge_opens_a_change_git_stops_on_as_a_conflict(cx: &mut TestAppContext) {
+    let (dir,viewer)=merge_view::gui_tests::fixture(cx);
+    for (name,text) in [("base","alpha line\n\nbeta line\ndelta line\n"),("ours","alpha line\n\nbeta line\ndelta CHANGED\n"),
+        ("theirs","alpha line\n\nbeta line\n\nbeta line\ndelta line\n")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let _=std::fs::remove_file(dir.path().join("result"));
+    let opened=crate::merge_session::open_files(&dir.path().join("base"),&dir.path().join("ours"),&dir.path().join("theirs"),&dir.path().join("result"),dir.path()).unwrap();
+    viewer.update(cx,|v,cx|v.start_merge(opened,false,cx));
+    let window=cx.update(|cx|cx.open_window(Default::default(),|_,_|viewer.clone())).unwrap();
+    window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
+    viewer.read_with(cx,|v,_|{let m=v.merge.as_ref().unwrap();assert_eq!(m.m.unresolved(),1);assert!(m.counters().starts_with("1 conflict left"),"{}",m.counters());});
+    assert!(!dir.path().join("result").exists(),"opening writes nothing");
+}
+
+#[gpui::test]
 fn gui_whitespace_output_change_requires_save_before_close(cx: &mut TestAppContext) {
     let (dir,viewer)=merge_view::gui_tests::fixture(cx);
     for (name,text) in [("base","a\n"),("ours"," a\n"),("theirs","a\nb\n")] {

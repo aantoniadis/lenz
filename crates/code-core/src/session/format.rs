@@ -324,12 +324,19 @@ pub(super) fn project_formats(snapshot: &crate::text::TextSnapshot) -> bool {
 pub(super) fn erb(file: &Path) -> bool { crate::template::Kind::of(file) == Some(crate::template::Kind::Erb) }
 
 /// The erb_lint an ERB template's project configures (its root: the open folder holding it, else its Ruby workspace),
-/// looked up on the Ruby provider's `PATH`. Reads project files.
+/// looked up on the Ruby provider's `PATH`. In a trusted folder, only what is found inside the trusted folder deciding
+/// it, as it runs (see [`run_erb_formatter`]), so Server Details never names a program that would not run. Reads
+/// project files.
 pub(crate) fn erb_formatter(file: &Path, project: Option<&Path>, settings: &semantics::provider::Settings) -> (Option<semantics::erb::ErbLint>, PathBuf, Option<std::ffi::OsString>) {
     // Never above the opened folder (else the trusted folder holding it, else its own folder).
     let root = semantics::provider::lookup_bound(file, project, settings).unwrap_or_else(|| file.parent().unwrap_or(Path::new("/")).to_owned());
     let path = semantics::provider::PROVIDERS.iter().find(|p| p.id == "ruby-lsp").and_then(|p| settings.launch(p).path().map(std::ffi::OsStr::to_owned)).or_else(|| std::env::var_os("PATH"));
-    (semantics::erb::configured(file, &root, path.as_deref()), root, path)
+    let lint = semantics::erb::configured(file, &root, path.as_deref());
+    let dir = file.parent().unwrap_or(Path::new("/"));
+    match lint.as_ref().filter(|l| l.run.is_some()).and_then(|_| semantics::provider::trusted_bound(dir, &root, settings)) {
+        Some(within) if within != root => (semantics::erb::configured(file, &within, path.as_deref()), within, path),
+        _ => (lint, root, path),
+    }
 }
 
 /// Run the project's erb_lint on an ERB template's draft (see [`semantics::erb::format`]); templates have no imports to
@@ -460,6 +467,31 @@ fn organize(value: &serde_json::Value, doc: &Document, encoding: semantics::lsp:
 #[cfg(test)]
 mod tests {
     use super::difference;
+
+    #[test]
+    fn erb_lint_is_named_only_where_it_would_run() {
+        use crate::semantics::erb::Run;
+        let dir = tempfile::tempdir().unwrap();
+        let open = std::fs::canonicalize(dir.path()).unwrap();
+        let inner = open.join("app");
+        let write = |p: &std::path::Path, text: &str| { std::fs::create_dir_all(p.parent().unwrap()).unwrap(); std::fs::write(p, text).unwrap(); };
+        let file = inner.join("views/page.html.erb");
+        write(&file, "<p></p>\n");
+        write(&inner.join(".erb_lint.yml"), "---\n");
+        let outer = open.join("bin/erb_lint");
+        write(&outer, "#!/bin/sh\n");
+        std::fs::set_permissions(&outer, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut settings = crate::semantics::provider::Settings::default();
+        // the opened folder is not trusted; the folder inside it is
+        settings.trusted.insert(inner.clone());
+        let (lint, root, _) = super::erb_formatter(&file, Some(&open), &settings);
+        assert_eq!(root, inner);
+        assert_ne!(lint.as_ref().and_then(|l| l.run.clone()), Some(Run::Binstub(outer.clone())), "{lint:?}");
+        assert!(!lint.unwrap().describe().contains(&outer.display().to_string()));
+        // trusting the opened folder instead names the binstub it holds, which then runs
+        settings.trusted = [open.clone()].into();
+        assert_eq!(super::erb_formatter(&file, Some(&open), &settings).0.and_then(|l| l.run), Some(Run::Binstub(outer)));
+    }
 
     fn apply(old: &str, new: &str) -> Option<(std::ops::Range<usize>, String)> {
         let edit = difference(old, new.to_owned())?;

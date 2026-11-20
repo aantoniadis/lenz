@@ -99,14 +99,27 @@ pub fn displayed_bytes(line: &str) -> usize {
     line.char_indices().nth(LONG_LINE).map_or(line.len(), |(b, _)| b)
 }
 
-/// A source line as drawn: its displayed prefix with tabs expanded, plus "  … N more characters" when cut, and
-/// the display offset of each source byte of the prefix ([`expand_tabs`]): its length is the prefix's byte length
-/// plus one.
+/// What follows the displayed prefix of a line cut at [`LONG_LINE`] (its first `cut` bytes, [`displayed_bytes`]):
+/// "  … N more characters"; `None` for a line drawn whole. A change past the cut still shows the line changed, and
+/// this note is where it is.
+pub fn cut_note(line: &str, cut: usize) -> Option<String> {
+    line.get(cut..).filter(|rest| !rest.is_empty()).map(|rest| format!("  … {} more characters", rest.chars().count()))
+}
+
+/// Columns [`cut_note`] adds after `line`'s displayed prefix: one per character.
+pub fn cut_note_columns(line: &str) -> usize {
+    // a line of at most LONG_LINE bytes has at most LONG_LINE characters, so is never cut
+    if line.len() <= LONG_LINE { return 0; }
+    cut_note(line, displayed_bytes(line)).map_or(0, |note| note.chars().count())
+}
+
+/// A source line as drawn: its displayed prefix with tabs expanded, plus its [`cut_note`] when cut, and the display
+/// offset of each source byte of the prefix ([`expand_tabs`]): its length is the prefix's byte length plus one.
 pub fn display_line(line: &str) -> (String, Vec<usize>) {
     let cut = displayed_bytes(line);
     let (mut text, map) = expand_tabs(&line[..cut]);
-    if cut < line.len() {
-        text += &format!("  … {} more characters", line[cut..].chars().count());
+    if let Some(note) = cut_note(line, cut) {
+        text += &note;
     }
     (text, map)
 }
@@ -149,6 +162,9 @@ mod tests {
         assert_eq!(map.len(), LONG_LINE * 2 + 1);
         assert_eq!(displayed_bytes(&long), LONG_LINE * 2);
         assert_eq!(display_line(""), (String::new(), vec![0]));
+        assert_eq!(cut_note(&long, displayed_bytes(&long)).as_deref(), Some("  … 3 more characters"));
+        assert_eq!(cut_note_columns(&long), "  … 3 more characters".chars().count());
+        assert_eq!((cut_note("short", 5), cut_note_columns("short"), cut_note_columns(&"x".repeat(LONG_LINE))), (None, 0, 0));
     }
 
     #[test]

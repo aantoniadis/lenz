@@ -39,7 +39,7 @@ pub enum FocusMove {
 #[derive(Clone, Debug)]
 pub(crate) struct TrustPrompt {
     folder: PathBuf,
-    real: PathBuf,
+    pub(super) real: PathBuf,
     parent: Option<PathBuf>,
     runs: Vec<&'static str>,
     focus: usize,
