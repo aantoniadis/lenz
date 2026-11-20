@@ -5110,3 +5110,151 @@ fn an_edited_file_shown_again_is_highlighted_with_a_server_without_decorations()
     f.settle(colored);
     assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), HINTED);
 }
+
+/// Rewrite the fixture's settings so that `key` (`trusted` or `declined`) holds `folders` (their links resolved), and
+/// start its session again (as after a restart).
+fn decide(f: &mut Fixture, key: &str, folders: &[&Path]) {
+    let providers = f._dir.path().join("config/providers.json");
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&providers).unwrap()).unwrap();
+    v[key] = serde_json::json!(folders.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect::<Vec<_>>());
+    std::fs::write(&providers, v.to_string()).unwrap();
+    f.s = session_in(f._dir.path(), std::sync::Arc::new(Instant::now), true);
+}
+
+/// Apply whatever arrives for `ms` milliseconds.
+fn drain(f: &mut Fixture, ms: u64) {
+    let rx = f.s.completions();
+    let until = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < until {
+        if let Ok(c) = recv(&rx) { f.s.dispatch(c); }
+    }
+}
+
+/// A folder trusted inside an opened folder that is not: the project's own programs are found only in the trusted
+/// folder, never in the opened folder around it (a venvPath of ".." names an environment of the opened folder).
+#[test]
+fn a_trusted_folder_inside_an_untrusted_opened_folder_runs_none_of_its_programs() {
+    let files = [("svc/pyrightconfig.json", "{ \"venvPath\": \"..\", \"venv\": \"e\" }"), ("svc/app.py", "x = 1\n"), ("e/lib/python3.12/site-packages/.keep", "")];
+    let mut f = untrusted_fixture("pyright", &files, serde_json::json!({}));
+    let marker = f._dir.path().join("python-ran");
+    script(&f.root.join("e/bin/python"), &format!("#!/bin/sh\ntouch '{}'\necho 'Python 3.12.0'\n", marker.display()));
+    let svc = f.root.join("svc");
+    decide(&mut f, "trusted", &[&svc]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    assert_eq!(f.s.folder_trust(), Some(code_core::semantics::provider::Trust::Unasked));
+    f.open("svc/app.py");
+    let environment = |s: &Session| s.state().provider().and_then(|v| v.environment).and_then(Result::ok).unwrap_or_default();
+    f.settle(|s| !environment(s).is_empty());
+    assert!(!marker.exists(), "the untrusted opened folder's interpreter ran: {}", environment(&f.s));
+    assert!(environment(&f.s).contains("Python version unknown"), "{}", environment(&f.s));
+}
+
+/// The same for formatting: a trusted folder's Python file is never formatted with the ruff of the untrusted opened
+/// folder's own environment.
+#[test]
+fn python_formatting_in_a_trusted_folder_never_runs_the_untrusted_opened_folders_ruff() {
+    let files = [("svc/pyproject.toml", "[project]\nname = \"p\"\n\n[tool.ruff]\nline-length = 60\n"), ("svc/app.py", "x  =  1\n")];
+    let mut f = untrusted_fixture("pyright", &files, serde_json::json!({}));
+    script(&f.root.join(".venv/bin/ruff"), FAKE_RUFF);
+    let svc = f.root.join("svc");
+    decide(&mut f, "trusted", &[&svc]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.open("svc/app.py");
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Format Document:")));
+    assert!(!f.root.join(".venv/bin/ruff.args").exists(), "the untrusted opened folder's ruff ran: {:?}", f.s.state().notices());
+}
+
+/// Trust Parent Folder after Stay Restricted: the folder is trusted with its parent, as the message says.
+#[test]
+fn trust_parent_folder_after_staying_restricted_trusts_the_folder() {
+    use code_core::semantics::provider::Trust;
+    let mut f = untrusted_fixture("rust-analyzer", &[("src/main.rs", "fn main() {}\n")], serde_json::json!({}));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.s.dispatch(Command::SetProjectToolsTrusted(false));
+    f.settle(|s| s.folder_trust() == Some(Trust::Declined) && s.disabled(CommandId::FolderTrust).is_none());
+    f.s.dispatch(Command::OpenFolderTrust);
+    assert!(f.s.trust_choices().iter().any(|c| c.1 == TrustChoice::TrustParent), "{:?}", f.s.trust_choices());
+    f.s.dispatch(Command::TrustChoice(TrustChoice::TrustParent));
+    assert_eq!(f.s.folder_trust(), Some(Trust::Trusted));
+    let parent = std::fs::canonicalize(f._dir.path()).unwrap();
+    assert!(f.notice(&format!("Trusted {}", parent.display())), "{:?}", f.s.state().notices());
+    f.open("src/main.rs");
+}
+
+/// The dialog asks only about what the open folder's own answer decides: a server held back for a folder outside the
+/// open one, or inside it but declined on its own, stays restricted without asking about the open folder.
+#[test]
+fn a_tool_held_back_elsewhere_does_not_ask_about_the_open_folder() {
+    let mut f = untrusted_fixture("gopls", &[("go.mod", "module m\n"), ("main.go", "package main\n"), ("sub/go.mod", "module s\n"), ("sub/main.go", "package main\n")], serde_json::json!({}));
+    let other = f._dir.path().join("other");
+    write(&other, "go.mod", "module o\n");
+    write(&other, "main.go", "package main\n");
+    let sub = f.root.join("sub");
+    decide(&mut f, "declined", &[&sub]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    for file in [other.join("main.go"), sub.join("main.go")] {
+        f.s.dispatch(Command::Open(file.clone()));
+        f.settle(|s| restricted(s) && s.state().current_source().is_some_and(|d| d.source() == file));
+        drain(&mut f, 300);
+        assert!(f.s.trust_text().is_none(), "{} asked about the open folder: {:?}", file.display(), f.s.trust_text());
+    }
+    assert!(f.s.language_server_details().contains("with its folder open"), "{}", f.s.language_server_details());
+    // The open folder's own server asks.
+    f.s.dispatch(Command::Open(f.root.join("main.go")));
+    f.settle(|s| restricted(s) && s.trust_text().is_some_and(|t| t.contains("gopls would run")));
+}
+
+/// A formatter's answer for a lone file arrives after a folder opened: it is not that folder's, and asks nothing.
+#[test]
+fn a_formatter_answer_from_before_a_folder_opened_asks_nothing() {
+    let files = [(".erb_lint.yml", "linters: {}\n"), ("a.html.erb", "<p><%= 1 %></p>\n")];
+    let mut f = untrusted_fixture("rust-analyzer", &files, serde_json::json!({}));
+    let marker = f._dir.path().join("erb-lint-ran");
+    script(&f.root.join("bin/erb_lint"), &format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()));
+    // No folder open: the template alone. The folder opens before the formatter's answer is applied.
+    f.s.dispatch(Command::Open(f.root.join("a.html.erb")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.html.erb")));
+    // Analysed first, so that Format runs the formatter at once rather than waiting for it.
+    drain(&mut f, 300);
+    f.s.dispatch(Command::Format(code_core::session::FormatKind::Format));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    drain(&mut f, 1000);
+    assert!(f.s.trust_text().is_none(), "{:?} {:?}", f.s.trust_text(), f.s.state().notices());
+    assert!(!marker.exists());
+}
+
+/// Another window's answer is taken over: Stop Trusting there stops the servers trusted here, and trusting there starts
+/// them again (its settings file is read again when it changes).
+#[test]
+fn folder_trust_changed_in_another_window_applies_here() {
+    use code_core::semantics::provider::Trust;
+    let mut f = untrusted_fixture("rust-analyzer", &[("src/main.rs", "fn main() {}\n")], serde_json::json!({}));
+    let root = f.root.clone();
+    decide(&mut f, "trusted", &[&root]);
+    f.s.dispatch(Command::OpenRoot(root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.open("src/main.rs");
+    let providers = f._dir.path().join("config/providers.json");
+    let rewrite = |from: &str, to: &str| {
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&providers).unwrap()).unwrap();
+        let folders = v[from].take();
+        v.as_object_mut().unwrap().remove(from);
+        v[to] = folders;
+        std::fs::write(&providers, v.to_string()).unwrap();
+    };
+    rewrite("trusted", "declined");
+    f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Tick));
+    f.settle(restricted);
+    assert_eq!(f.s.folder_trust(), Some(Trust::Declined));
+    // Coming back to the window checks too (the adapters recheck on focus).
+    rewrite("declined", "trusted");
+    f.s.dispatch(Command::Recheck);
+    f.settle(ready);
+    assert_eq!(f.s.folder_trust(), Some(Trust::Trusted));
+}

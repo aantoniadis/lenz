@@ -44,12 +44,18 @@ Language servers that run a project's code (rust-analyzer, typescript-language-s
 gopls) and the project's own programs (typescript-go's `node_modules/.bin/tsc`, a configured Python environment's
 interpreter and formatters, erb_lint, haml-lint) stay off with the status "Off until you trust this folder". The first
 time one of them would start in a folder never asked about, the shared folder-trust dialog asks once, naming the folder
-and what would run: **Stay Restricted** (Enter and Escape), **Trust** (Alt+T) or **Trust Parent Folder** (Alt+P, not
-offered for the file system root or the home folder); a click on a button works too, and no plain key trusts. The
-dialog takes every key before the editor, wraps and scrolls in a narrow terminal (Up/Down, Page keys, Home/End), and
-the answer is remembered. A **Restricted** item in the status bar (both adapters) and **Folder Trust…** in the
+and what would run: **Stay Restricted**, **Trust** or **Trust Parent Folder** (not offered for the file system root, the
+home folder or a folder holding it, a folder every account can write to, or another account's folder). Escape stays
+restricted; Tab and Shift+Tab move the focus, and Enter right after takes the focused choice (any other key, text or
+paste puts the focus back on Stay Restricted, so typing into the dialog never trusts); a click on a button works too.
+The GUI also takes Alt+T and Alt+P; the terminal does not, since a terminal without the kitty keyboard protocol sends
+Alt+T as Escape then T (a parity difference in shortcuts only). It asks only about the opened folder: a tool held back
+outside it, or in a folder inside it answered on its own, stays restricted silently. The dialog takes every key before
+the editor, wraps and scrolls in a narrow terminal (Up/Down, Page keys, Home/End), and the answer is remembered, and
+followed by every open window. A **Restricted** item in the status bar (both adapters) and **Folder Trust…** in the
 Language Servers menu, F10 and Find Action open it again; **Trust Project Tools in This Folder** and **Stop Trusting
-Project Tools in This Folder** stay in the same menus ([folder trust](code/providers.md#project-tools-and-folder-trust)).
+Project Tools in This Folder** stay in the same menus ([folder
+trust](code/providers.md#project-tools-and-folder-trust)).
 
 The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
 line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.

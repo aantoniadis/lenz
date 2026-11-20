@@ -8384,7 +8384,7 @@ fn gui_the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restri
     assert!(f.view.read_with(&v, |r, _| trust_open(r) && text(r) == "fn main() {}\n" && r.session().folder_trust() == Some(Trust::Unasked)));
     // The buttons, Stay Restricted first (the default).
     let labels = f.view.read_with(&v, |r, _| r.details_labels(Details::Trust));
-    assert_eq!(labels, ["Stay Restricted (Enter)", "Trust (Alt+T)", "Trust Parent Folder (Alt+P)"]);
+    assert_eq!(labels, ["Stay Restricted (Esc)", "Trust (Alt+T)", "Trust Parent Folder (Alt+P)"]);
     // Enter stays restricted, remembered as declined; nothing ran.
     v.simulate_keystrokes("enter");
     assert!(f.view.read_with(&v, |r, _| !trust_open(r) && r.session().folder_trust() == Some(Trust::Declined)));
@@ -8415,11 +8415,12 @@ fn gui_the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restri
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {}\n");
 }
 
-/// Alt+T in the GUI dialog trusts; Alt+P trusts the folder holding the open one.
+/// Alt+T in the GUI dialog trusts; Alt+P trusts the folder holding the open one. Tab (or an arrow) moves the focus to
+/// a choice and Enter takes it, as in the terminal.
 #[gpui::test]
 fn gui_alt_t_and_alt_p_answer_the_folder_trust_dialog(cx: &mut TestAppContext) {
     use code_core::semantics::provider::Trust;
-    for (keys, trusted) in [("alt-t", "project"), ("alt-p", "")] {
+    for (keys, trusted) in [("alt-t", "project"), ("alt-p", ""), ("tab enter", "project"), ("tab tab enter", ""), ("tab tab shift-tab tab enter", "")] {
         let f = untrusted_fixture(cx, None, &[]);
         let root = f.dir.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
@@ -8432,5 +8433,26 @@ fn gui_alt_t_and_alt_p_answer_the_folder_trust_dialog(cx: &mut TestAppContext) {
         assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().folder_trust() == Some(Trust::Trusted)), "{keys}");
         let folder = if trusted.is_empty() { std::fs::canonicalize(f.dir.path()).unwrap() } else { std::fs::canonicalize(&root).unwrap() };
         assert!(f.view.read_with(&v, |r, _| r.session().state().notices().iter().any(|n| n.contains(&format!("Trusted {}", folder.display())))), "{keys}");
+    }
+}
+
+/// Escape then T, as two keys (a terminal without the kitty protocol would send Alt+T so): Escape keeps the folder
+/// restricted and T is typed; Enter alone stays restricted, as does Enter after any other key than Tab (typing into the
+/// dialog never trusts), and Shift+Tab never goes past Stay Restricted, nor Tab around the last choice.
+#[gpui::test]
+fn gui_escape_then_t_never_trusts_the_folder(cx: &mut TestAppContext) {
+    use code_core::semantics::provider::Trust;
+    let trust_open = |r: &ReaderView| matches!(r.modal, Some(Modal::StatusDetails { kind: Details::Trust, .. }));
+    for keys in ["escape t", "enter", "tab shift-tab enter", "tab x enter", "tab right enter", "tab down enter", "shift-tab enter", "tab tab tab enter"] {
+        let f = untrusted_fixture(cx, None, &[]);
+        let root = f.dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+        settle(cx, &f, |r| r.session().state().project().is_some());
+        f.view.update(cx, |v, cx| v.dispatch_for_test(Command::OpenFolderTrust, cx));
+        let mut v = visual(cx, &f);
+        assert!(f.view.read_with(&v, |r, _| trust_open(r)));
+        v.simulate_keystrokes(keys);
+        assert!(f.view.read_with(&v, |r, _| !trust_open(r) && r.session().folder_trust() == Some(Trust::Declined)), "{keys}");
     }
 }

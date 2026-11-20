@@ -2,14 +2,19 @@
 //! language server or formatter that would run the project's code is held back in a folder never asked about, one
 //! dialog asks (Trust, Trust Parent Folder or Stay Restricted), naming what would run. The answer is kept privately in
 //! providers.json (trusted or declined), so a folder is asked about once; the Restricted status item and Folder Trust…
-//! open the dialog again. Trust decisions are made on paths with their links resolved.
+//! open the dialog again. Trust decisions are made on paths with their links resolved. Only what the open folder's own
+//! answer decides asks: a tool held back elsewhere (outside the open folder, or in a folder inside it that was answered
+//! on its own) stays restricted without asking. Enter takes the focused choice, Stay Restricted unless Tab moved the
+//! focus there just before: any other input to the dialog (a key, typed or pasted text) puts the focus back on Stay
+//! Restricted, so that typing into it never trusts.
 use super::*;
 use semantics::provider::{Trust, RESTRICTED};
 
 /// The dialog's title, the same in both frontends.
 pub const TITLE: &str = "Do you trust the authors of the files in this folder?";
 
-/// An answer to the folder-trust dialog. Enter and Escape choose [`TrustChoice::StayRestricted`].
+/// An answer to the folder-trust dialog. Escape chooses [`TrustChoice::StayRestricted`], and so does Enter until the
+/// focus is moved ([`Session::trust_focus`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrustChoice {
     StayRestricted,
@@ -17,14 +22,27 @@ pub enum TrustChoice {
     TrustParent,
 }
 
-/// The folder-trust dialog: the opened folder, with its links resolved, the folder holding it (unless that is the file
-/// system root or the home folder), and what would run there, in the order it was held back.
+/// How the folder-trust dialog's focus moves ([`super::Command::TrustFocus`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusMove {
+    /// Tab: the next choice, back to Stay Restricted after the last.
+    Next,
+    /// Shift+Tab: the previous choice, never past Stay Restricted.
+    Previous,
+    /// Any other input the dialog receives: back to Stay Restricted.
+    Reset,
+}
+
+/// The folder-trust dialog: the opened folder, with its links resolved, the folder holding it (see
+/// [`offered_parent`]), what would run there, in the order it was held back, and the focused choice (an index into
+/// [`Session::trust_choices`]).
 #[derive(Clone, Debug)]
 pub(crate) struct TrustPrompt {
     folder: PathBuf,
     real: PathBuf,
     parent: Option<PathBuf>,
     runs: Vec<&'static str>,
+    focus: usize,
 }
 
 /// What Restricted mode keeps off, for the dialog the user opens rather than a held-back tool.
@@ -33,10 +51,18 @@ const KEPT_OFF: [&str; 2] = [
     "the project's own programs: typescript-go's node_modules/.bin/tsc, a configured Python environment's interpreter, ruff and black, and the erb_lint and haml-lint formatters",
 ];
 
-/// The folder Trust Parent Folder would trust for folder `real`: its parent, but never the file system root nor the
-/// home folder `home`, which hold nearly everything.
-fn offered_parent(real: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    real.parent().filter(|d| d.parent().is_some() && Some(*d) != home).map(Path::to_owned)
+/// The folder Trust Parent Folder would trust for folder `real`: its parent, but never the file system root, the home
+/// folder `home` or a folder holding it (`/home`, `/Users`), which hold nearly everything, nor a folder that is not
+/// the user's own (`own`: owned by the user, and not writable by every account, as `/tmp` is).
+fn offered_parent(real: &Path, home: Option<&Path>, own: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    real.parent().filter(|d| d.parent().is_some() && !home.is_some_and(|h| h.starts_with(d)) && own(d)).map(Path::to_owned)
+}
+
+/// Whether folder `dir` is the user's own: no other account can write to it, and it belongs to the owner of the home
+/// folder `home` (when known). Reads the folders' metadata.
+fn own_folder(dir: &Path, home: Option<&Path>) -> bool {
+    use semantics::provider::{closed_folder, owner_of};
+    closed_folder(dir) && home.is_none_or(|h| owner_of(dir).is_some_and(|o| Some(o) == owner_of(h)))
 }
 
 impl Session {
@@ -74,11 +100,34 @@ impl Session {
         choices
     }
 
-    /// A tool that would run the project's code (`runs` says what) was held back: the first time in an opened folder
-    /// never asked about, the dialog asks; while it is open, it says this too. Never asked with no folder open, or
-    /// for a folder already answered.
-    pub(super) fn want_trust(&mut self, runs: &'static str) {
-        if self.folder_trust() != Some(Trust::Unasked) { return; }
+    /// The folder-trust dialog's focused choice, which Enter takes: Stay Restricted until the focus is moved.
+    pub fn trust_focus(&self) -> Option<TrustChoice> {
+        let focus = self.state.trust_prompt.as_ref()?.focus;
+        let choices = self.trust_choices();
+        choices.get(focus).or(choices.first()).map(|c| c.1)
+    }
+
+    /// Move the dialog's focus (see [`FocusMove`]).
+    pub(super) fn move_trust_focus(&mut self, to: FocusMove) -> Effect {
+        let count = self.trust_choices().len();
+        let Some(p) = self.state.trust_prompt.as_mut().filter(|_| count > 0) else { return Effect::default() };
+        let before = p.focus;
+        p.focus = match to {
+            FocusMove::Next => (p.focus.min(count - 1) + 1) % count,
+            FocusMove::Previous => p.focus.min(count - 1).saturating_sub(1),
+            FocusMove::Reset => 0,
+        };
+        Effect { repaint: p.focus != before, ..Effect::default() }
+    }
+
+    /// A tool that would run the project's code (`runs` says what) was held back in folder `real` (its links
+    /// resolved): when that folder is in the open folder and decided by the open folder's own answer, never given, the
+    /// dialog asks the first time; while it is open, it says this too. Never asked with no folder open, for a folder
+    /// already answered, or about a folder outside the open one (it stays restricted: opening it asks).
+    pub(super) fn want_trust(&mut self, real: &Path, runs: &'static str) {
+        let Some(project) = self.project_real.as_deref() else { return };
+        // Unasked here means no folder from `real` up has an answer: the open folder's answer decides it.
+        if !real.starts_with(project) || self.state.semantics.settings().trust(real) != Trust::Unasked { return; }
         match self.state.trust_prompt.as_mut() {
             Some(p) => if !p.runs.contains(&runs) { p.runs.push(runs); },
             None => self.open_trust_prompt(Some(runs)),
@@ -89,8 +138,8 @@ impl Session {
     pub(super) fn open_trust_prompt(&mut self, runs: Option<&'static str>) {
         let (Some(folder), Some(real)) = (self.state.project.as_ref().map(|p| p.root().to_owned()), self.project_real.clone()) else { return };
         let home = self.home.as_deref().map(|h| std::fs::canonicalize(h).unwrap_or_else(|_| h.to_owned()));
-        let parent = offered_parent(&real, home.as_deref());
-        self.state.trust_prompt = Some(TrustPrompt { folder, real, parent, runs: runs.into_iter().collect() });
+        let parent = offered_parent(&real, home.as_deref(), |d| own_folder(d, home.as_deref()));
+        self.state.trust_prompt = Some(TrustPrompt { folder, real, parent, runs: runs.into_iter().collect(), focus: 0 });
     }
 
     /// The dialog's answer: trust the folder (or the folder holding it), or keep it restricted; remembered either way.
@@ -135,15 +184,30 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::offered_parent;
+    use super::{offered_parent, own_folder};
     use std::path::Path;
 
     #[test]
-    fn trust_parent_folder_is_never_offered_for_the_file_system_root_or_home() {
-        assert_eq!(offered_parent(Path::new("/srv"), None), None, "the parent is /");
-        assert_eq!(offered_parent(Path::new("/"), None), None);
-        assert_eq!(offered_parent(Path::new("/home/u/proj"), Some(Path::new("/home/u"))), None, "the parent is home");
-        assert_eq!(offered_parent(Path::new("/home/u/work/proj"), Some(Path::new("/home/u"))).as_deref(), Some(Path::new("/home/u/work")));
-        assert_eq!(offered_parent(Path::new("/home/u"), Some(Path::new("/home/u"))).as_deref(), Some(Path::new("/home")), "home itself is opened: its parent is offered");
+    fn trust_parent_folder_is_never_offered_for_the_file_system_root_home_or_a_shared_folder() {
+        let mine = |_: &Path| true;
+        assert_eq!(offered_parent(Path::new("/srv"), None, mine), None, "the parent is /");
+        assert_eq!(offered_parent(Path::new("/"), None, mine), None);
+        assert_eq!(offered_parent(Path::new("/home/u/proj"), Some(Path::new("/home/u")), mine), None, "the parent is home");
+        assert_eq!(offered_parent(Path::new("/home/u/work/proj"), Some(Path::new("/home/u")), mine).as_deref(), Some(Path::new("/home/u/work")));
+        assert_eq!(offered_parent(Path::new("/home/u"), Some(Path::new("/home/u")), mine), None, "home opened: /home holds every account's home");
+        assert_eq!(offered_parent(Path::new("/Users/u"), Some(Path::new("/Users/u")), mine), None);
+        // A folder every account can write to (as /tmp), or another account's, is not the user's own.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let (shared, private) = (d.path().join("shared"), d.path().join("private"));
+        for f in [&shared, &private] { std::fs::create_dir_all(f.join("proj")).unwrap(); }
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let home = Some(d.path());
+        assert_eq!(offered_parent(&shared.join("proj"), home, |f| own_folder(f, home)), None, "world-writable");
+        assert_eq!(offered_parent(&private.join("proj"), home, |f| own_folder(f, home)).as_deref(), Some(private.as_path()));
+        let root_owned = semantics_owner(Path::new("/")) != semantics_owner(d.path());
+        if root_owned { assert!(!own_folder(Path::new("/usr"), home), "another account's folder"); }
     }
+
+    fn semantics_owner(path: &Path) -> Option<u32> { crate::semantics::provider::owner_of(path) }
 }

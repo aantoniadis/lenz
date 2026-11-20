@@ -419,8 +419,9 @@ type Served = (usize, PathBuf);
 pub enum Event {
     /// The workspace root for sources in `dir` by provider `provider`'s rules (or the override), or none.
     /// `provider` is the language's; `serve` the provider serving `root` ([`provider::serving`]).
-    /// `real`: the root with its links resolved, which folder trust is decided on.
-    Resolved { root_epoch: u64, provider: usize, dir: PathBuf, root: Option<PathBuf>, serve: usize, real: Option<PathBuf> },
+    /// `real`: the root with its links resolved, which folder trust is decided on; `trusted`: where the project's own
+    /// programs may be found for it ([`provider::trusted_bound`]; `None`: not trusted).
+    Resolved { root_epoch: u64, provider: usize, dir: PathBuf, root: Option<PathBuf>, serve: usize, real: Option<PathBuf>, trusted: Option<PathBuf> },
     /// The server would run the project's own code (`runs` says what) in a folder that is not trusted: `held`, it was
     /// not started (its executable was found); else it runs without that program.
     Restricted { session: u64, runs: &'static str, held: bool },
@@ -718,11 +719,14 @@ pub struct Semantics {
     waiting: Option<Waiting>,
     /// The browsing root, as of the last sync.
     browse: Option<PathBuf>,
-    /// Workspace roots with their links resolved (as resolved), which trust is decided on.
-    real: HashMap<PathBuf, PathBuf>,
-    /// What servers held back in a folder that is not trusted would run, with the browsing root they were held in:
+    /// Workspace roots with their links resolved (as resolved), which trust is decided on, and where the project's
+    /// own programs may be found for them when trusted ([`provider::trusted_bound`]).
+    real: HashMap<PathBuf, (PathBuf, Option<PathBuf>)>,
+    /// What servers held back in a folder that is not trusted would run, with their workspace roots' links resolved:
     /// for the session to ask about once.
-    trust_wanted: Vec<(Option<PathBuf>, &'static str)>,
+    trust_wanted: Vec<(PathBuf, &'static str)>,
+    /// The settings file's modification time and size when last read: another window's change shows in them.
+    stamp: Option<(std::time::SystemTime, u64)>,
     /// The server session last sent a question of the user's: the one whose answer opened a dependency.
     last_asked: Option<u64>,
     /// Server-originated notices for the session to show (declined edits, server errors).
@@ -749,6 +753,7 @@ impl Semantics {
             idle,
             clock,
             settings: Settings::read(&settings_file),
+            stamp: stamp(&settings_file),
             settings_file,
             servers: Vec::new(),
             processes: Vec::new(),
@@ -921,7 +926,7 @@ impl Semantics {
             let session = match self.server(q, &root) {
                 Some(s) => s.session,
                 None => {
-                    let launch = self.settings.launch_in(&PROVIDERS[q], browse, &root, self.trusted(&root));
+                    let launch = self.settings.launch_in(&PROVIDERS[q], self.trusted(&root));
                     self.queue(Key { provider: q, root, launch }, doc.source().to_owned())
                 }
             };
@@ -1483,10 +1488,31 @@ impl Semantics {
     pub fn set_trust(&mut self, folder: PathBuf, trusted: bool, browse: Option<&Path>) -> Settings {
         self.reload();
         self.settings.set_trust(folder.clone(), trusted);
-        let real = &self.real;
-        let affected = |s: &Server| browse.is_some_and(|b| s.key.root.starts_with(b)) || matches!(s.status, Status::Restricted(_))
-            || real.get(&s.key.root).is_some_and(|r| r.starts_with(&folder));
-        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(affected);
+        self.restart_where(|me, s| browse.is_some_and(|b| s.key.root.starts_with(b)) || matches!(s.status, Status::Restricted(_))
+            || me.real.get(&s.key.root).is_some_and(|r| r.0.starts_with(&folder)));
+        self.settings.clone()
+    }
+
+    /// Another window (or the user) changed the settings file: its folder trust is taken over, and the servers whose
+    /// trust it changes stop and are chosen again (Stop Trusting in one window stops them in every window). Only the
+    /// file's time and size are read unless it changed. Returns whether folder trust changed.
+    pub fn settings_changed(&mut self) -> bool {
+        let now = stamp(&self.settings_file);
+        if now == self.stamp { return false; }
+        self.stamp = now;
+        let disk = Settings::read(&self.settings_file);
+        if disk.trusted == self.settings.trusted && disk.declined == self.settings.declined { return false; }
+        let before = Settings { trusted: std::mem::replace(&mut self.settings.trusted, disk.trusted), declined: std::mem::replace(&mut self.settings.declined, disk.declined), ..Settings::default() };
+        self.restart_where(|me, s| {
+            let real = me.real.get(&s.key.root).map_or(s.key.root.as_path(), |r| r.0.as_path());
+            before.trusted_folder(real) != me.settings.trusted_folder(real)
+        });
+        true
+    }
+
+    /// Stop the servers `affected` picks and choose every workspace's server again (typescript-go depends on trust).
+    fn restart_where(&mut self, affected: impl Fn(&Self, &Server) -> bool) {
+        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(|s| affected(self, s));
         self.servers = keep;
         let servers = &self.servers;
         self.queued.retain(|q| servers.iter().any(|s| s.session == *q));
@@ -1494,17 +1520,18 @@ impl Semantics {
         self.roots.clear();
         self.invalidate_root_lookups();
         stop.into_iter().for_each(Server::stop);
-        self.settings.clone()
     }
 
-    /// Whether the user trusts the folder holding workspace `root` (decided on its links resolved, once known).
-    fn trusted(&self, root: &Path) -> bool {
-        self.settings.trust(self.real.get(root).map_or(root, PathBuf::as_path)) == provider::Trust::Trusted
+    /// Where the project's own programs for workspace `root` may be found, while the user trusts the folder deciding
+    /// it (decided on its links resolved, once known): see [`provider::trusted_bound`].
+    fn trusted(&self, root: &Path) -> Option<&Path> {
+        let (real, bound) = self.real.get(root)?;
+        bound.as_deref().filter(|_| self.settings.trust(real) == provider::Trust::Trusted)
     }
 
-    /// What servers held back in a folder that is not trusted would run, since last asked, with the browsing root
-    /// they were held in.
-    pub fn take_trust_wanted(&mut self) -> Vec<(Option<PathBuf>, &'static str)> {
+    /// What servers held back in a folder that is not trusted would run, since last asked, with their workspace roots'
+    /// links resolved.
+    pub fn take_trust_wanted(&mut self) -> Vec<(PathBuf, &'static str)> {
         std::mem::take(&mut self.trust_wanted)
     }
 
@@ -1578,6 +1605,7 @@ impl Semantics {
     /// Re-read the settings file (the user may have edited it) before acting on or saving settings.
     fn reload(&mut self) {
         self.settings = Settings::read(&self.settings_file);
+        self.stamp = stamp(&self.settings_file);
         // Shell scripts are checked again with the settings as they are now.
         self.shell.again();
     }
@@ -1631,11 +1659,11 @@ impl Semantics {
 
     pub fn event(&mut self, event: Event, events: &async_channel::Sender<Completion>) -> Outcome {
         let mut outcome = match event {
-            Event::Resolved { root_epoch, provider, dir, root, serve, real } => {
+            Event::Resolved { root_epoch, provider, dir, root, serve, real, trusted } => {
                 if root_epoch != self.root_epoch {
                     Outcome::default()
                 } else {
-                    if let (Some(root), Some(real)) = (&root, real) { self.real.insert(root.clone(), real); }
+                    if let (Some(root), Some(real)) = (&root, real) { self.real.insert(root.clone(), (real, trusted)); }
                     // One choice per root: a server of the language already there keeps serving it.
                     let serve = root.as_ref().and_then(|r| self.servers.iter().find(|s| provider::primary(s.key.provider) == provider && s.key.root == *r)).map_or(serve, |s| s.key.provider);
                     self.roots.insert((provider, dir), Some(root.map(|r| (serve, r))));
@@ -1659,7 +1687,8 @@ impl Semantics {
                     s.status = Status::Restricted(runs);
                     s.initializing = None;
                 }
-                self.trust_wanted.push((self.browse.clone(), runs));
+                let real = self.real.get(&s.key.root).map_or_else(|| s.key.root.clone(), |r| r.0.clone());
+                self.trust_wanted.push((real, runs));
                 Outcome { repaint: true, ..Outcome::default() }
             }
             Event::Environment { session, line } => {
@@ -2494,10 +2523,15 @@ fn runtime_failure(key: &Key, provider: &Provider, exe: &Path) -> String {
     lenz_content::display::expand_tabs(&format!("{details}{}", requirement.map(|r| format!("; Pyright package engines.node: {r}")).unwrap_or_default())).0
 }
 
-/// A provider's settings as server `key` receives them: Pyright's leave out a project's interpreter in a folder the user
-/// does not trust ([`python::untrusted`]).
+/// A settings file's modification time and size (`None`: it cannot be read).
+fn stamp(file: &Path) -> Option<(std::time::SystemTime, u64)> {
+    std::fs::metadata(file).ok().and_then(|m| Some((m.modified().ok()?, m.len())))
+}
+
+/// A provider's settings as server `key` receives them: Pyright's leave out a project's interpreter outside the folder
+/// where the project's own programs may run ([`python::sent`]).
 fn sent(key: &Key, settings: Value) -> Value {
-    if PROVIDERS[key.provider].id == "pyright" && key.launch.trusted.is_none() { python::untrusted(settings) } else { settings }
+    if PROVIDERS[key.provider].id == "pyright" { python::sent(settings, &key.root, key.launch.trusted.as_deref()) } else { settings }
 }
 
 /// Where a server's version (and its runtime's) is asked: its workspace in a folder the user trusts, else outside any
@@ -2946,9 +2980,9 @@ mod tests {
         assert!(!semantics.roots.contains_key(&key),"the obsolete choice cannot start a server");
         semantics.roots.insert(key.clone(),None);
         let root_epoch=semantics.root_epoch();
-        semantics.event(Event::Resolved{root_epoch,provider,dir:dir.path().to_owned(),root:None,serve:provider,real:None},&tx);
+        semantics.event(Event::Resolved{root_epoch,provider,dir:dir.path().to_owned(),root:None,serve:provider,real:None,trusted:None},&tx);
         assert!(matches!(semantics.roots.get(&key),Some(Some(None))),"the next lookup is accepted");
-        let outcome=semantics.event(Event::Resolved{root_epoch:old_epoch,provider,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:provider,real:None},&tx);
+        let outcome=semantics.event(Event::Resolved{root_epoch:old_epoch,provider,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:provider,real:None,trusted:None},&tx);
         assert!(!outcome.ready);
         assert!(matches!(semantics.roots.get(&key),Some(Some(None))),"an old answer arriving last cannot replace the new result");
     }
@@ -2961,7 +2995,7 @@ mod tests {
         let root_epoch=semantics.root_epoch();
         semantics.manifests_changed();
         let (tx,_rx)=async_channel::bounded(32);
-        semantics.event(Event::Resolved{root_epoch,provider:0,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:0,real:None},&tx);
+        semantics.event(Event::Resolved{root_epoch,provider:0,dir:dir.path().to_owned(),root:Some(dir.path().to_owned()),serve:0,real:None,trusted:None},&tx);
         assert!(!semantics.roots.contains_key(&key),"a lookup invalidated by a manifest change cannot restore its old workspace");
     }
 

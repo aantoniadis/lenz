@@ -724,6 +724,21 @@ pub fn lookup_bound(file: &Path, browse: Option<&Path>, settings: &Settings) -> 
     dir.ancestors().find(|a| std::fs::canonicalize(a).is_ok_and(|r| r == trusted)).map(Path::to_owned)
 }
 
+/// The folder the project's own programs for `dir` (a workspace root, a file's folder) are found no higher than: the
+/// highest of `dir` and the folders holding it, no higher than `bound` (the lookup bound), whose links resolve inside
+/// the trusted folder deciding that `dir` is trusted. `None` when the user does not trust `dir` or it is not inside
+/// `bound`: an opened folder that is not trusted never bounds them because a folder inside it is. Resolves links:
+/// call off the UI thread.
+pub fn trusted_bound(dir: &Path, bound: &Path, settings: &Settings) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(dir).ok()?;
+    let trusted = settings.trusted_folder(&real)?;
+    // Without links on the way, every folder holding it is its own resolved path.
+    if real == dir {
+        return Some(if trusted.starts_with(bound) { trusted } else { bound }).filter(|b| dir.starts_with(b)).map(Path::to_owned);
+    }
+    dir.ancestors().take_while(|a| a.starts_with(bound) && std::fs::canonicalize(a).is_ok_and(|r| r.starts_with(trusted))).last().map(Path::to_owned)
+}
+
 /// `file`'s folders, nearest first, up to the browsing root holding it, else only its own folder: no project lookup
 /// goes above the opened folder (a manifest above it belongs to someone else's project).
 pub(crate) fn folders<'a>(file: &'a Path, browse: Option<&'a Path>) -> impl Iterator<Item = &'a Path> + Clone {
@@ -763,9 +778,9 @@ fn typescript_language_id(language: Language, path: &Path) -> &'static str {
 /// The provider serving workspace `root` for provider `p`'s languages (`p` is [`for_language`]'s) in browsing root
 /// `browse`: `p` itself, except that typescript-go serves TypeScript where typescript-language-server would find no
 /// TypeScript with tsserver and a TypeScript 7 `tsc` can run (or the project has one that runs once its folder is
-/// trusted). `trusted`: the user trusts the folder holding `root`. Reads files and looks on PATH: call off the UI
-/// thread.
-pub fn serving(p: usize, root: &Path, settings: &Settings, browse: Option<&Path>, trusted: bool) -> usize {
+/// trusted). `trusted`: where the project's own programs may be found ([`trusted_bound`]; `None`: the user does not
+/// trust `root`). Reads files and looks on PATH: call off the UI thread.
+pub fn serving(p: usize, root: &Path, settings: &Settings, browse: Option<&Path>, trusted: Option<&Path>) -> usize {
     let go = || PROVIDERS.iter().position(|q| q.id == "typescript-go");
     match PROVIDERS[p].id {
         "typescript-language-server" if typescript_go_serves(&PROVIDERS[p], root, settings, browse, trusted) => go().unwrap_or(p),
@@ -782,9 +797,9 @@ pub fn primary(q: usize) -> usize {
 /// typescript-language-server uses the tsserver its settings name, else the workspace's TypeScript, else the one
 /// installed beside it; TypeScript 7 has no tsserver. typescript-go serves when none of those has one and it can run,
 /// or the project has its own TypeScript 7 `tsc` that is not trusted (its status then says how to trust it).
-fn typescript_go_serves(tls: &Provider, root: &Path, settings: &Settings, browse: Option<&Path>, trusted: bool) -> bool {
+fn typescript_go_serves(tls: &Provider, root: &Path, settings: &Settings, browse: Option<&Path>, trusted: Option<&Path>) -> bool {
     let Some(go) = PROVIDERS.iter().find(|q| q.id == "typescript-go") else { return false };
-    let launch = settings.launch_in(go, browse, root, trusted);
+    let launch = settings.launch_in(go, trusted);
     // Never above the browsing root holding the workspace (without one, the workspace root).
     let within = browse.filter(|b| root.starts_with(b)).unwrap_or(root);
     if go_executable(root, &launch).is_err() && (launch.executable != Path::new("tsc") || project_tsc(root, within).is_none()) {
@@ -863,7 +878,9 @@ fn package_dir_version(dir: &Path) -> Option<String> {
 /// that browsing root; without one, the nearest such file's folder, else the file's.
 fn typescript_root(file: &Path, browse: Option<&Path>, bound: Option<&Path>) -> Option<PathBuf> {
     // A dependency (in some project's `node_modules`) belongs to that project's server, not one of its own.
-    if let Some(project) = file.ancestors().find(|d| d.file_name().is_some_and(|n| n == "node_modules")).and_then(Path::parent) {
+    // Never above the lookup bound (the browsing root holding it, else its own folder).
+    let limit = bound.or(browse.filter(|b| file.starts_with(b))).or(file.parent());
+    if let Some(project) = file.ancestors().find(|d| d.file_name().is_some_and(|n| n == "node_modules")).and_then(Path::parent).filter(|p| limit.is_some_and(|l| p.starts_with(l))) {
         return typescript_root(&project.join("package.json"), browse, bound);
     }
     let browse = browse.filter(|b| file.starts_with(b));
@@ -901,7 +918,7 @@ fn java_root(file: &Path, browse: Option<&Path>, bound: Option<&Path>) -> Option
 }
 
 /// The account owning `path` (Unix), `None` elsewhere or when it cannot be read.
-fn owner_of(path: &Path) -> Option<u32> {
+pub(crate) fn owner_of(path: &Path) -> Option<u32> {
     #[cfg(unix)]
     { std::fs::metadata(path).ok().map(|m| std::os::unix::fs::MetadataExt::uid(&m)) }
     #[cfg(not(unix))]
@@ -918,7 +935,7 @@ fn owned_by(path: &Path, owner: Option<u32>) -> bool {
 }
 
 /// Whether only its owner and group can write to folder `dir` (every account can write to `/tmp`).
-fn closed_folder(dir: &Path) -> bool {
+pub(crate) fn closed_folder(dir: &Path) -> bool {
     #[cfg(unix)]
     { use std::os::unix::fs::MetadataExt; std::fs::metadata(dir).is_ok_and(|m| m.mode() & 0o002 == 0) }
     #[cfg(not(unix))]
@@ -1189,11 +1206,10 @@ impl Settings {
         launch
     }
 
-    /// How `provider` is launched for workspace `root` in browsing root `browse`: [`Self::launch`], trusting the
-    /// project's own tools when `trusted` (the user trusts the folder holding the workspace), found no higher than the
-    /// browsing root holding it, else than the workspace root.
-    pub fn launch_in(&self, provider: &Provider, browse: Option<&Path>, root: &Path, trusted: bool) -> Launch {
-        Launch { trusted: trusted.then(|| browse.filter(|b| root.starts_with(b)).unwrap_or(root).to_owned()), ..self.launch(provider) }
+    /// How `provider` is launched for a workspace: [`Self::launch`], trusting the project's own tools found no higher
+    /// than `trusted` (the workspace's [`trusted_bound`]; `None`: the user does not trust it).
+    pub fn launch_in(&self, provider: &Provider, trusted: Option<&Path>) -> Launch {
+        Launch { trusted: trusted.map(Path::to_owned), ..self.launch(provider) }
     }
 
     /// What the user decided about folder `real` (a canonical path): see [`Trust`].
@@ -1210,15 +1226,12 @@ impl Settings {
         real.ancestors().find(|d| self.declined.contains(*d) || self.trusted.contains(*d)).filter(|d| !self.declined.contains(*d))
     }
 
-    /// Trust `folder` (a canonical path), or keep it restricted: a folder is in one set at most.
+    /// Trust `folder` (a canonical path), or keep it restricted: a folder is in one set at most, and the answer
+    /// replaces those given for folders inside it (Trust Parent Folder after Stay Restricted trusts the folder too).
     pub fn set_trust(&mut self, folder: PathBuf, trusted: bool) {
-        if trusted {
-            self.declined.remove(&folder);
-            self.trusted.insert(folder);
-        } else {
-            self.trusted.remove(&folder);
-            self.declined.insert(folder);
-        }
+        self.trusted.retain(|d| !d.starts_with(&folder));
+        self.declined.retain(|d| !d.starts_with(&folder));
+        if trusted { self.trusted.insert(folder); } else { self.declined.insert(folder); }
     }
 
     /// `provider`'s `initializationOptions`: its defaults with the user's settings merged over them, object by
@@ -1623,7 +1636,9 @@ mod tests {
         assert_eq!((ts.language_id)(Language::JavaScript, Path::new("a.jsx")), "javascriptreact");
         assert_eq!((ts.language_id)(Language::JavaScript, Path::new("A.JSX")), "javascriptreact");
         std::fs::create_dir_all(w.join("web/node_modules/@types/x")).unwrap();
-        assert_eq!(typescript_root(&w.join("web/node_modules/@types/x/index.d.ts"), None, None).as_deref(), Some(&*w.join("web")), "a dependency joins its project's server");
+        assert_eq!(typescript_root(&w.join("web/node_modules/@types/x/index.d.ts"), None, None).as_deref(), Some(&*w.join("web/node_modules/@types/x")), "a lone dependency: never above its own folder");
+        assert_eq!(typescript_root(&w.join("web/node_modules/@types/x/index.d.ts"), None, Some(w)).as_deref(), Some(&*w.join("web")), "a dependency joins its project's server, inside the trusted folder holding it");
+        assert_eq!(typescript_root(&w.join("web/node_modules/@types/x/index.d.ts"), None, Some(&w.join("web/node_modules"))).as_deref(), Some(&*w.join("web/node_modules/@types/x")));
         assert_eq!(typescript_root(&w.join("web/node_modules/@types/x/index.d.ts"), Some(w), None).as_deref(), Some(&*w.join("web")));
         assert_eq!((ts.language_id)(Language::JavaScript, Path::new("a.mjs")), "javascript");
         assert_eq!(for_language(Language::Tsx).map(|(_, p)| p.id), Some("typescript-language-server"));
@@ -1669,10 +1684,10 @@ mod tests {
         let (tls, _) = for_language(Language::TypeScript).unwrap();
         let go = PROVIDERS.iter().position(|p| p.id == "typescript-go").unwrap();
         // `w` opened, not trusted: nothing of the project's runs.
-        let serving = |root: &str, s: &Settings| PROVIDERS[serving(tls, &w.join(root), s, Some(w), false)].id;
+        let serving = |root: &str, s: &Settings| PROVIDERS[serving(tls, &w.join(root), s, Some(w), None)].id;
         let s = settings(serde_json::json!({}));
         // `w` opened and trusted: its projects' own tsc may run.
-        let go_in = |root: &str, s: &Settings| go_executable(&w.join(root), &s.launch_in(&PROVIDERS[go], Some(w), &w.join(root), true));
+        let go_in = |root: &str, s: &Settings| go_executable(&w.join(root), &s.launch_in(&PROVIDERS[go], Some(w)));
         assert_eq!(serving("ts5", &s), "typescript-language-server", "the project's TypeScript has tsserver");
         assert_eq!(serving("ts7/src", &s), "typescript-go", "a TypeScript 7 project (from a folder inside it)");
         assert_eq!(serving("plain", &s), "typescript-go", "no project TypeScript, and the installed one is TypeScript 7");
@@ -1683,7 +1698,7 @@ mod tests {
         assert_eq!(serving("plain", &gone), "typescript-go", "a named tsserver that is not there is ignored, as it does");
         assert_eq!(go_in("ts7", &s), Ok(w.join("ts7/node_modules/.bin/tsc")), "a trusted project's own tsc first");
         assert_eq!(go_executable(&w.join("ts7"), &s.launch(&PROVIDERS[go])), Ok(w.join("g/bin/tsc")), "an untrusted project's tsc never runs");
-        let elsewhere = s.launch_in(&PROVIDERS[go], Some(&w.join("plain")), &w.join("ts7"), false);
+        let elsewhere = s.launch_in(&PROVIDERS[go], None);
         assert_eq!(go_executable(&w.join("ts7"), &elsewhere), Ok(w.join("g/bin/tsc")), "a workspace in no trusted folder is not trusted");
         assert_eq!(go_executable(&w.join("plain"), &s.launch(&PROVIDERS[go])), Ok(w.join("g/bin/tsc")));
         assert_eq!(go_in("plain", &s), Ok(w.join("g/bin/tsc")));
@@ -1705,9 +1720,9 @@ mod tests {
         assert!(notice.contains("is not run, because this folder is not trusted"), "{notice}");
         assert_eq!(go_tools(&w.join("ts7"), &Value::Null, None, Some(w)), Ok(String::new()));
         // A tsc above the trusted folder (or above the workspace with none) is never searched for.
-        assert!(go_executable(&w.join("ts7/sub"), &s.launch_in(&PROVIDERS[go], Some(&w.join("ts7/sub")), &w.join("ts7/sub"), true)).is_err());
+        assert!(go_executable(&w.join("ts7/sub"), &s.launch_in(&PROVIDERS[go], Some(&w.join("ts7/sub")))).is_err());
         // The TypeScript decision does not look above the opened folder either.
-        assert_eq!(PROVIDERS[super::serving(tls, &w.join("ts7/src"), &s, Some(&w.join("ts7/src")), false)].id, "typescript-language-server", "a TypeScript 7 above the opened folder is not the project's");
+        assert_eq!(PROVIDERS[super::serving(tls, &w.join("ts7/src"), &s, Some(&w.join("ts7/src")), None)].id, "typescript-language-server", "a TypeScript 7 above the opened folder is not the project's");
         package("g/lib/node_modules/typescript", "7.0.2");
         let nowhere = settings(serde_json::json!({ "typescript-go": { "executable": "/nonexistent/tsc" } }));
         assert_eq!(serving("ts7", &nowhere), "typescript-language-server", "the named executable is not there");
@@ -1715,7 +1730,7 @@ mod tests {
         let missing = settings(serde_json::json!({ "typescript-language-server": { "executable": "/nonexistent/tls" } }));
         assert_eq!(serving("plain", &missing), "typescript-go");
         // Other languages have one provider.
-        assert_eq!(super::serving(0, w, &Settings::default(), None, false), 0, "rust-analyzer");
+        assert_eq!(super::serving(0, w, &Settings::default(), None, None), 0, "rust-analyzer");
     }
 
     #[test]
@@ -2133,5 +2148,49 @@ mod tests {
         std::fs::write(d.path().join("tool"), "").unwrap();
         assert_eq!(find_executable(Path::new("tool"), Some(d.path().as_os_str())), Some(d.path().join("tool")));
         assert_eq!(find_executable(Path::new("tool"), Some(std::ffi::OsStr::new("/nonexistent"))), None);
+    }
+
+    /// An answer replaces those given for folders inside it: Trust Parent Folder after Stay Restricted trusts the
+    /// folder too, and Stay Restricted on a folder keeps a folder trusted inside it restricted as well.
+    #[test]
+    fn a_trust_answer_replaces_those_for_folders_inside_it() {
+        let mut s = Settings::default();
+        let (parent, child) = (PathBuf::from("/w"), PathBuf::from("/w/proj"));
+        s.set_trust(child.join("vendor"), true);
+        s.set_trust(child.clone(), false);
+        s.set_trust(parent.clone(), true);
+        assert_eq!(s.trust(&child), Trust::Trusted, "the declined folder inside is trusted with its parent");
+        assert_eq!((s.trusted.iter().collect::<Vec<_>>(), s.declined.len()), (vec![&parent], 0));
+        s.set_trust(child.join("svc"), true);
+        s.set_trust(parent.clone(), false);
+        assert_eq!(s.trust(&child.join("svc")), Trust::Declined);
+        assert_eq!((s.trusted.len(), s.declined.iter().collect::<Vec<_>>()), (0, vec![&parent]));
+        s.set_trust(PathBuf::from("/other"), true);
+        s.set_trust(PathBuf::from("/w2"), true);
+        s.set_trust(parent.clone(), true);
+        assert_eq!(s.trusted.len(), 3, "folders beside it keep their answers (/w2 is not inside /w)");
+    }
+
+    /// The project's own programs are found no higher than the trusted folder deciding the workspace, nor than the
+    /// opened folder: an opened folder that is not trusted never bounds them, through a link either.
+    #[test]
+    fn programs_are_found_only_inside_the_trusted_folder_deciding_the_workspace() {
+        let d = tempfile::tempdir().unwrap();
+        let m = std::fs::canonicalize(d.path()).unwrap().join("m");
+        std::fs::create_dir_all(m.join("svc/src")).unwrap();
+        std::fs::create_dir_all(m.join("other")).unwrap();
+        let svc = m.join("svc");
+        let s = Settings { trusted: [svc.clone()].into(), ..Default::default() };
+        assert_eq!(trusted_bound(&svc.join("src"), &m, &s).as_deref(), Some(svc.as_path()), "not the opened folder above it");
+        assert_eq!(trusted_bound(&svc.join("src"), &svc.join("src"), &s).as_deref(), Some(&*svc.join("src")), "nor above the opened folder");
+        assert_eq!(trusted_bound(&m.join("other"), &m, &s), None, "not trusted");
+        assert_eq!(trusted_bound(&svc, &m.join("other"), &s), None, "outside the bound");
+        let all = Settings { trusted: [m.clone()].into(), ..Default::default() };
+        assert_eq!(trusted_bound(&svc.join("src"), &m, &all).as_deref(), Some(m.as_path()));
+        // A link in the untrusted opened folder to the trusted one: the link's own folder, never the folder holding it.
+        std::os::unix::fs::symlink(&svc, m.join("other/link")).unwrap();
+        assert_eq!(trusted_bound(&m.join("other/link/src"), &m, &s).as_deref(), Some(&*m.join("other/link")));
+        let declined = Settings { trusted: [m.clone()].into(), declined: [svc.clone()].into(), ..Default::default() };
+        assert_eq!(trusted_bound(&svc.join("src"), &m, &declined), None, "declined inside the trusted folder");
     }
 }

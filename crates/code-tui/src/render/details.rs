@@ -14,6 +14,14 @@ impl Button {
     }
 }
 impl App {
+    /// The details dialog's focused button: the folder-trust dialog's focused choice, else the first.
+    pub(crate) fn details_focus(&self, kind: Details) -> usize {
+        match kind {
+            Details::Trust => self.session.trust_focus().and_then(|f| self.session.trust_choices().iter().position(|(_, c)| *c == f)).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     pub(crate) fn details_buttons(&self) -> Vec<Button> {
         let Some(crate::app::Modal { kind: Prompt::Details { kind, .. }, .. }) = &self.modal else { return Vec::new() };
         let b = Button::new;
@@ -35,9 +43,10 @@ impl App {
                 use code_core::branches::CheckoutChoice;
                 b(label, match c { CheckoutChoice::Smart => "s", CheckoutChoice::Force => "f", CheckoutChoice::ConfirmForce => "y", CheckoutChoice::Cancel => "Esc" }, false, matches!(c, CheckoutChoice::Force | CheckoutChoice::ConfirmForce))
             }).collect(),
+            // The focused choice takes Enter; Tab moves the focus to the others (Escape always stays restricted).
             Details::Trust => self.session.trust_choices().into_iter().map(|(label, c)| {
-                use code_core::session::TrustChoice;
-                b(label, match c { TrustChoice::StayRestricted => "Enter", TrustChoice::Trust => "Alt+T", TrustChoice::TrustParent => "Alt+P" }, false, false)
+                let focused = self.session.trust_focus() == Some(c);
+                b(label, if focused { "Enter" } else if c == code_core::session::TrustChoice::StayRestricted { "Esc" } else { "Tab" }, false, false)
             }).collect(),
             Details::Change => vec![b("Show Diff", "d", false, false), b("Revert Change", "r", false, true), close()],
             Details::Sql => vec![b("SQL menu", "m", false, false), b("Copy", "Ctrl+C", false, false), close()],
@@ -56,7 +65,7 @@ pub(super) fn footer_rows(buttons: &[Button], width: u16, max_rows: u16) -> u16 
     buttons.len().div_ceil(columns(buttons, width, max_rows)) as u16
 }
 
-pub(super) fn paint_footer(frame: &mut ratatui::Frame, geometry: &mut Geometry, area: Rect, buttons: &[Button], kind: Details, p: &Palette) {
+pub(super) fn paint_footer(frame: &mut ratatui::Frame, geometry: &mut Geometry, area: Rect, buttons: &[Button], kind: Details, focus: usize, p: &Palette) {
     let cols = columns(buttons, area.width, area.height);
     let width = area.width.saturating_sub(cols.saturating_sub(1) as u16) / cols as u16;
     let mut rects = Vec::new();
@@ -65,7 +74,7 @@ pub(super) fn paint_footer(frame: &mut ratatui::Frame, geometry: &mut Geometry, 
         let y = area.y.saturating_add((i / cols) as u16).min(area.bottom());
         let rect = Rect::new(x, y, width.min(area.right() - x), u16::from(y < area.bottom()));
         let fg = if button.disabled { p.dim } else if button.destructive { p.error } else { p.fg };
-        let bg = if i == 0 && !button.destructive && !button.disabled { p.selected_bg } else { p.status_bg };
+        let bg = if i == focus && !button.destructive && !button.disabled { p.selected_bg } else { p.status_bg };
         let suffix = if button.key.is_empty() { "]".to_string() } else { format!(" {}]", button.key) };
         let label = code_core::chrome::ellipsize(&button.label, (width as usize).saturating_sub(suffix.width() + 1));
         let shown = code_core::chrome::ellipsize(&format!("[{label}{suffix}"), width as usize);

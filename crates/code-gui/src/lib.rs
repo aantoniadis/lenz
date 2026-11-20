@@ -177,7 +177,8 @@ pub enum Details {
     Reconcile,
     Replace,
     Recovered,
-    /// The folder-trust dialog: Enter and Escape stay restricted; Alt+T trusts, Alt+P trusts the parent folder.
+    /// The folder-trust dialog: Escape stays restricted; Enter takes the focused choice (Stay Restricted unless Tab
+    /// moved the focus just before); Alt+T trusts, Alt+P trusts the parent folder.
     Trust,
 }
 
@@ -2275,12 +2276,22 @@ impl ReaderView {
             return cx.notify();
         }
         if let Some(Modal::StatusDetails { kind: Details::Trust, .. }) = &self.modal {
-            // It may open while the user types: Enter and Escape stay restricted (as any details dialog closes, below),
-            // and trusting takes Alt with a letter, never a plain key.
-            use code_core::session::TrustChoice as T;
+            // It may open while the user types: Escape stays restricted (as any details dialog closes, below), Enter
+            // takes the focused choice (Stay Restricted unless Tab moved the focus just before: any other key puts it
+            // back), and trusting otherwise takes Alt with a letter, never a plain key.
+            use code_core::session::{FocusMove, TrustChoice as T};
             let m = &ev.keystroke.modifiers;
             let alt = m.alt && !(m.control || m.platform) && !ev.is_held;
-            let pick = match key { "t" if alt => Some(T::Trust), "p" if alt => Some(T::TrustParent), _ => None };
+            let plain = !(m.alt || m.control || m.platform) && !ev.is_held;
+            match key {
+                "tab" if !(m.alt || m.control || m.platform) => {
+                    self.dispatch(Command::TrustFocus(if m.shift { FocusMove::Previous } else { FocusMove::Next }), cx);
+                    return cx.notify();
+                }
+                "enter" | "escape" => {}
+                _ => self.dispatch(Command::TrustFocus(FocusMove::Reset), cx),
+            }
+            let pick = match key { "t" if alt => Some(T::Trust), "p" if alt => Some(T::TrustParent), "enter" if plain && !m.shift => self.session.trust_focus(), _ => None };
             if let Some(c) = pick.filter(|c| self.session.trust_choices().iter().any(|(_, d)| d == c)) {
                 self.dispatch(Command::TrustChoice(c), cx);
                 return cx.notify();
@@ -3497,7 +3508,7 @@ impl ReaderView {
             Details::Install => self.session.server_install_actions().into_iter().map(CommandId::label).chain(std::iter::once("Close")).collect(),
             Details::Checkout => self.session.checkout_choices().into_iter().map(|c| c.0).collect(),
             Details::Trust => self.session.trust_choices().into_iter().map(|(_, c)| match c {
-                code_core::session::TrustChoice::StayRestricted => "Stay Restricted (Enter)",
+                code_core::session::TrustChoice::StayRestricted => "Stay Restricted (Esc)",
                 code_core::session::TrustChoice::Trust => "Trust (Alt+T)",
                 code_core::session::TrustChoice::TrustParent => "Trust Parent Folder (Alt+P)",
             }).collect(),
@@ -6435,6 +6446,8 @@ impl Render for ReaderView {
         }
         let details_kind = match self.modal { Some(Modal::StatusDetails { kind, .. }) => Some(kind), _ => None };
         let details_modal = details_kind.is_some();
+        // The button Enter takes: the folder-trust dialog's focused choice, else the first.
+        let details_primary = if details_kind == Some(Details::Trust) { self.session.trust_focus().and_then(|f| self.session.trust_choices().iter().position(|(_, c)| *c == f)).unwrap_or(0) } else { 0 };
         let checkout_danger: Vec<_> = if details_kind == Some(Details::Checkout) { self.session.checkout_choices().into_iter().map(|(_, c)| matches!(c, code_core::branches::CheckoutChoice::Force | code_core::branches::CheckoutChoice::ConfirmForce)).collect() } else { Vec::new() };
         let details_buttons = match &self.modal {
             Some(Modal::StatusDetails { kind, .. }) => self.details_labels(*kind),
@@ -6939,7 +6952,7 @@ impl Render for ReaderView {
                                                 Some(Details::Checkout) => checkout_danger.get(index).copied().unwrap_or(false),
                                                 _ => false,
                                             };
-                                            let primary = index == 0 && !destructive;
+                                            let primary = index == details_primary && !destructive;
                                             let edge = if disabled { border } else if destructive { palette.error } else if primary { palette.accent } else { border };
                                             let hover = clip.contains(&window.mouse_position());
                                             lenz_gpui::popup::field(window, x, y, f32::from(b.size.width), f32::from(b.size.height), edge, if !disabled && (primary || hover) { palette.menu_selected(bg) } else { bg });

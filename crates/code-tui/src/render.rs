@@ -1551,6 +1551,7 @@ impl App {
         }
         let title = if self.modal.as_ref().is_some_and(|m| m.kind == Prompt::Branches) { self.session.state().branches().map_or_else(|| "Branches".to_string(), |b| b.heading().to_string()) } else { self.modal_title() };
         let details_buttons = self.details_buttons();
+        let details_focus = self.details_focus(crate::app::Details::Trust);
         let theme_source = self
             .modal
             .as_ref()
@@ -1676,7 +1677,7 @@ impl App {
                 let rows = details::footer_rows(&details_buttons, content.width, content.height.saturating_sub(1)).min(content.height);
                 let footer = Rect::new(content.x, content.bottom().saturating_sub(rows), content.width, rows);
                 content.height = content.height.saturating_sub(rows + u16::from(content.height > rows + 2));
-                details::paint_footer(frame, geometry, footer, &details_buttons, kind, p);
+                details::paint_footer(frame, geometry, footer, &details_buttons, kind, if kind == crate::app::Details::Trust { details_focus } else { 0 }, p);
             }
             let body = match &modal.kind {
                 Prompt::Details { body, .. } => body.as_str(),

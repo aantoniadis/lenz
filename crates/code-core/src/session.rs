@@ -76,7 +76,7 @@ mod explorer_history;
 mod delete_work;
 #[path = "session/trust.rs"]
 mod trust_work;
-pub use trust_work::{TrustChoice, TITLE as TRUST_TITLE};
+pub use trust_work::{FocusMove, TrustChoice, TITLE as TRUST_TITLE};
 #[path = "session/recovery.rs"]
 mod recovery_work;
 #[path = "session/reconcile.rs"]
@@ -575,6 +575,9 @@ pub enum Command {
     OpenFolderTrust,
     /// The folder-trust dialog's answer.
     TrustChoice(TrustChoice),
+    /// Move the folder-trust dialog's focus; Enter takes the focused choice, Stay Restricted unless Tab moved the focus
+    /// just before (any other input to the dialog moves it back).
+    TrustFocus(FocusMove),
     OpenServerInstall,
     StartServerInstall,
     CancelServerInstall,
@@ -4258,7 +4261,7 @@ impl Session {
                 }
                 match v.status {
                     semantics::Status::Disabled => rows.push("Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into()),
-                    semantics::Status::Restricted(runs) => rows.push(format!("{}: {runs}. Lenz runs no code from a folder until you trust it: choose Restricted in the status bar, Folder Trust… or Trust Project Tools in This Folder.", semantics::provider::RESTRICTED)),
+                    semantics::Status::Restricted(runs) => rows.push(format!("{}: {runs}. Lenz runs no code from a folder until you trust it: with its folder open, choose Restricted in the status bar, Folder Trust… or Trust Project Tools in This Folder.", semantics::provider::RESTRICTED)),
                     semantics::Status::Missing(_) if self.state.current_source().is_some_and(|d| d.is_large()) => rows.push("Large files do not start a language server. Open a smaller source file to use semantic navigation.".into()),
                     semantics::Status::Missing(_) if unmapped => {}
                     semantics::Status::Missing(_) if !has_root => rows.push("No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into()),
@@ -5148,13 +5151,15 @@ impl Session {
                 }
             }
             Command::Recheck => {
+                // Coming back to the window: another window may have changed folder trust.
+                let trust = self.trust_changed_elsewhere();
                 for id in self.state.tabs.iter().map(|t| t.id).collect::<Vec<_>>() {
                     self.refresh(id);
                 }
                 if !self.watcher.available() {
                     self.rescan();
                 }
-                Effect::default()
+                Effect { repaint: trust, ..Effect::default() }
             }
             Command::Search { query, scope } => {
                 let (scope, pattern) = match scope {
@@ -6182,6 +6187,7 @@ impl Session {
                 self.set_folder_trust(real, trusted)
             }
             Command::TrustChoice(choice) => self.choose_trust(choice),
+            Command::TrustFocus(to) => self.move_trust_focus(to),
             Command::OpenFolderTrust => {
                 if self.disabled(CommandId::FolderTrust).is_some() { return Effect::default(); }
                 if self.state.trust_prompt.is_none() { self.open_trust_prompt(None); }
@@ -6249,6 +6255,9 @@ impl Session {
     /// Idle servers stop; running ones have their process groups' memory sampled off the UI thread.
     fn tick(&mut self) -> Effect {
         let mut repaint = self.state.semantics.expire();
+        // Folder trust changed in another window: only the settings file's time and size are checked here (never
+        // while this window's own save is being written).
+        repaint |= self.trust_changed_elsewhere();
         // No repository yet, but a `.git` appeared (git init, a clone): look again. A file check, no git process.
         if self.state.repo.is_none()
             && self.state.repo_checked()
@@ -6325,6 +6334,16 @@ impl Session {
     fn cancel_documentation(&mut self) {
         self.doc_latest.store(0, Ordering::Release);
         if let Some(pending) = self.pending_doc.take() { self.analysis.cancel_consumer(pending.source.key.buffer, crate::analysis::Consumer::Documentation); }
+    }
+
+    /// Folder trust changed in another window: its servers stop and are chosen again, as after this window's own answer.
+    /// Only the settings file's time and size are checked (never while this window's own save is being written).
+    fn trust_changed_elsewhere(&mut self) -> bool {
+        if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || !self.state.semantics.settings_changed() { return false; }
+        self.state.asking = None;
+        self.cancel_semantic_analysis();
+        self.synced = 0;
+        true
     }
 
     fn cancel_semantic_analysis(&mut self) {
@@ -6743,11 +6762,12 @@ impl Session {
                 // No lookup above the opened folder (else the trusted folder holding the file, else its own folder).
                 let within = semantics::provider::lookup_bound(&file, browse.as_deref(), &settings);
                 let root = over.or_else(|| (semantics::provider::PROVIDERS[provider].root)(&file, browse.as_deref(), within.as_deref()));
-                // Trust is decided on the root with its links resolved.
+                // Trust is decided on the root with its links resolved; the project's own programs are found no higher
+                // than the trusted folder deciding it, nor than the opened folder.
                 let real = root.as_deref().and_then(|r| std::fs::canonicalize(r).ok());
-                let trusted = real.as_deref().is_some_and(|r| settings.trust(r) == semantics::provider::Trust::Trusted);
-                let serve = root.as_deref().map_or(provider, |r| semantics::provider::serving(provider, r, &settings, within.as_deref(), trusted));
-                let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir, root, serve, real }));
+                let trusted = root.as_deref().and_then(|r| semantics::provider::trusted_bound(r, browse.as_deref().filter(|b| r.starts_with(b)).unwrap_or(r), &settings));
+                let serve = root.as_deref().map_or(provider, |r| semantics::provider::serving(provider, r, &settings, within.as_deref(), trusted.as_deref()));
+                let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir, root, serve, real, trusted }));
             });
         };
         // Only servers that run can be kept warm.
@@ -7943,10 +7963,8 @@ impl Session {
                 for d in std::mem::take(&mut outcome.decorations) {
                     self.decode(d);
                 }
-                // Held back in this folder (not a previous one): the dialog asks once.
-                for (browse, runs) in self.state.semantics.take_trust_wanted() {
-                    if browse.as_deref() == self.state.project.as_ref().map(|p| p.root()) { self.want_trust(runs); }
-                }
+                // Held back in the open folder, on its own answer: the dialog asks once.
+                for (real, runs) in self.state.semantics.take_trust_wanted() { self.want_trust(&real, runs); }
                 let mut effect = Effect { repaint: outcome.repaint || !self.state.semantics.notices.is_empty(), copy: None, ..Effect::default() };
                 self.state.messages.append(&mut self.state.semantics.notices);
                 if outcome.ready {
@@ -9122,8 +9140,9 @@ impl Session {
         }
         self.results_back.clear();
         self.results_forward.clear();
-        // Project closure stops its language servers now.
+        // Project closure stops its language servers now, and a formatter's late answer is not this folder's.
         self.state.asking = None;
+        self.cancel_format();
         self.cancel_semantic_analysis();
         self.state.semantics.stop_all();
         self.synced = 0;

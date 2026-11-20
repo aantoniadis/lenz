@@ -118,7 +118,9 @@ pub(crate) enum Details {
     Reconcile,
     Replace,
     Recovered,
-    /// The folder-trust dialog: Enter and Escape stay restricted; Alt+T trusts, Alt+P trusts the parent folder.
+    /// The folder-trust dialog: Escape stays restricted; Enter takes the focused choice (Stay Restricted unless Tab
+    /// moved the focus just before). No letter trusts: without the kitty keyboard protocol, Alt+T arrives as Escape
+    /// then T.
     Trust,
 }
 pub(crate) struct Modal {
@@ -1549,6 +1551,10 @@ impl App {
                 if self.log_focus && self.modal.is_none() && !self.session.state().terminal().focused() { return false; }
                 if self.modal.is_some() {
                     self.double_shift.key(false);
+                    // Pasted into the folder-trust dialog: its focus goes back to Stay Restricted.
+                    if matches!(self.modal.as_ref().map(|m| &m.kind), Some(Prompt::Details { kind: Details::Trust, .. })) {
+                        self.dispatch(Command::TrustFocus(code_core::session::FocusMove::Reset));
+                    }
                     self.edit_prompt(&text, false);
                 } else if self.session.state().terminal().focused() {
                     self.terminal_command(code_core::terminal::Command::Paste(text));
@@ -1684,14 +1690,22 @@ impl App {
             }
             return;
         }
-        // The folder-trust dialog may open while the user types: Enter and Escape stay restricted, trusting takes Alt
-        // with a letter (never a plain key), and only its scrolling keys go on; nothing reaches behind it.
+        // The folder-trust dialog may open while the user types: Escape stays restricted, and Enter takes the focused
+        // choice, Stay Restricted unless Tab moved the focus just before (any other key puts it back). No letter
+        // trusts: a terminal without the kitty keyboard protocol sends Alt+T as Escape then T, which a quick Escape
+        // and T also make. Only its scrolling keys go on; nothing reaches behind it.
         if matches!(kind, Prompt::Details { kind: Details::Trust, .. }) {
-            use code_core::session::TrustChoice;
+            use code_core::session::{FocusMove, TrustChoice};
+            match key.code {
+                KeyCode::Tab if !control && !alt && !key.modifiers.contains(KeyModifiers::SHIFT) => return self.dispatch(Command::TrustFocus(FocusMove::Next)),
+                KeyCode::Tab | KeyCode::BackTab if !control && !alt => return self.dispatch(Command::TrustFocus(FocusMove::Previous)),
+                KeyCode::Enter | KeyCode::Esc => {}
+                _ => { self.dispatch(Command::TrustFocus(FocusMove::Reset)); }
+            }
             let choice = match key.code {
+                // Alt+Enter is Escape then Enter: Escape's choice.
+                KeyCode::Enter if !alt && !control => self.session.trust_focus(),
                 KeyCode::Enter | KeyCode::Esc => Some(TrustChoice::StayRestricted),
-                KeyCode::Char('t' | 'T') if alt && !control => Some(TrustChoice::Trust),
-                KeyCode::Char('p' | 'P') if alt && !control => Some(TrustChoice::TrustParent),
                 _ => None,
             };
             if let Some(choice) = choice.filter(|c| self.session.trust_choices().iter().any(|(_, d)| d == c)) {

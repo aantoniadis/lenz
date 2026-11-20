@@ -3768,7 +3768,7 @@ fn decoded_decorations_from_a_restarted_provider_cannot_complete_a_new_request()
     // allowing the replacement real fake-provider process to initialize before text readiness.
     let provider = semantics::provider::for_language(highlight::Language::Rust).unwrap().0;
     let root_epoch = s.state.semantics.root_epoch();
-    s.dispatch(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir: d.path().to_owned(), root: Some(d.path().to_owned()), serve: provider, real: None }));
+    s.dispatch(Completion::Semantic(semantics::Event::Resolved { root_epoch, provider, dir: d.path().to_owned(), root: Some(d.path().to_owned()), serve: provider, real: None, trusted: None }));
     settle(&mut s, |s| s.state().provider().is_some_and(|p| p.status == semantics::Status::Ready));
     for release in releases { release.send(()).unwrap(); }
     settle(&mut s, |s| s.state.semantics.desired().get(&file).is_some_and(|d| d.version() == current.key().version));

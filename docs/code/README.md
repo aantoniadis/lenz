@@ -422,9 +422,10 @@ provider settings live in `$XDG_CONFIG_HOME/lenz-code/providers.json`.
 Until you trust an opened folder, Lenz Code is in **Restricted** mode there and runs no code from it: language servers
 that run a project's code (its build scripts, its Bundler setup, its TypeScript plugins) and the project's own
 formatters stay off, while highlighting, search, Markdown, Git views and the other servers keep working. The first time
-one would start, one dialog asks whether you trust the folder's authors (Stay Restricted is the default); the answer is
-remembered, and the status bar's **Restricted** item opens the dialog again
-([folder trust](providers.md#project-tools-and-folder-trust)).
+one would start, one dialog asks whether you trust the folder's authors (Stay Restricted is the default; Tab moves the
+focus to Trust and Enter takes it); the answer is remembered, every open window follows it, and the status bar's
+**Restricted** item opens the dialog again. Trusted, a folder's own programs are found only inside it, but Cargo and
+RuboCop still read configuration from the folders above it ([folder trust](providers.md#project-tools-and-folder-trust)).
 Completion rows show their kinds, separate adjacent kind groups and emphasize matching text while preserving
 the server's ranking. Their documentation renders Markdown and syntax-highlighted code, with scrolling instead
 of a short truncated excerpt. Wheel over the documentation, or use Alt+PageUp/PageDown/Home/End, to read it;

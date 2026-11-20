@@ -1,6 +1,6 @@
 //! The folder-trust dialog (Restricted mode) through the terminal's real input: the held-back server's trigger, the
 //! Restricted status item and the command menu open it; it takes input before the editor; Enter and Escape stay
-//! restricted; only Alt+T trusts.
+//! restricted; only Tab (or an arrow) to a Trust button, then Enter, trusts: no letter does, with Alt or not.
 use super::*;
 use crate::app::{Details, Prompt};
 use code_core::semantics::{provider::Trust, Status};
@@ -58,7 +58,7 @@ fn the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restricted
     assert!(screen.contains("Stay Restricted") && screen.contains("Lenz Code runs"), "{screen}");
     key(&mut a, KeyCode::End, KeyModifiers::NONE);
     let screen = draw_screen(&mut a, 40, 16);
-    assert!(screen.contains("status bar asks") && screen.contains("again.") && screen.contains("[Trust Alt+T]"), "{screen}");
+    assert!(screen.contains("status bar asks") && screen.contains("again.") && screen.contains("[Trust Tab]"), "{screen}");
     assert!(trust_open(&a));
     // Enter stays restricted, remembered as declined; nothing ran and the file is as it was.
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -80,22 +80,85 @@ fn the_folder_trust_dialog_takes_input_first_and_enter_or_escape_stay_restricted
     assert!(!trust_open(&a));
     assert_eq!(a.session.folder_trust(), Some(Trust::Declined));
     assert!(!marker.exists());
-    // The command menu opens it (once the answer is saved); Alt+T trusts, and the held-back server starts without
-    // reopening anything.
+    // The command menu opens it (once the answer is saved); Tab to Trust, then Enter, trusts, and the held-back server
+    // starts without reopening anything.
     settle(&mut a, |a| a.session.disabled(CommandId::FolderTrust).is_none());
     key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
     a.handle(Event::Paste("Folder Trust".into()));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     draw(&mut a, 100, 24);
     assert!(trust_open(&a), "the command menu opens the dialog: {}", a.modal_title());
-    // Ctrl+T is not Alt+T: only Alt with the letter trusts.
+    // No letter trusts, with Ctrl or Alt either.
     key(&mut a, KeyCode::Char('t'), KeyModifiers::CONTROL);
-    assert!(trust_open(&a) && a.session.folder_trust() == Some(Trust::Declined));
     key(&mut a, KeyCode::Char('t'), KeyModifiers::ALT);
+    assert!(trust_open(&a) && a.session.folder_trust() == Some(Trust::Declined));
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(draw_screen(&mut a, 100, 24).contains("[Trust Enter]"), "the focused choice takes Enter");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!trust_open(&a));
     assert_eq!(a.session.folder_trust(), Some(Trust::Trusted));
     settle(&mut a, |a| marker.exists() && a.session.state().provider().is_some_and(|v| matches!(v.status, Status::Ready | Status::Indexing(_))));
     draw(&mut a, 100, 24);
     assert!(!a.layout.controls.iter().any(|(id, _)| *id == CommandId::FolderTrust), "no Restricted item in a trusted folder");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {}\n");
+}
+
+/// A terminal without the kitty keyboard protocol sends Alt+T as Escape then T, and a quick Escape then T (one SSH
+/// packet) arrives the same way: neither trusts. Escape keeps the folder restricted and the letter goes to the editor;
+/// Enter alone stays restricted, as does Enter after any other input than Tab; Tab to a Trust button and Enter trusts.
+#[test]
+fn the_folder_trust_dialog_never_trusts_on_escape_then_a_letter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut a, file, marker) = restricted_app(dir.path());
+    a.dispatch(Command::Open(file));
+    settle(&mut a, |a| trust_open(a) && a.session.state().current_source().is_some());
+    // As a legacy terminal parses Escape then T (or P) sent together.
+    key(&mut a, KeyCode::Char('t'), KeyModifiers::ALT);
+    key(&mut a, KeyCode::Char('p'), KeyModifiers::ALT);
+    assert!(trust_open(&a));
+    assert_eq!(a.session.folder_trust(), Some(Trust::Unasked));
+    // Escape, then T, as separate events: restricted, and the letter is typed.
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('t'), KeyModifiers::NONE);
+    assert!(!trust_open(&a));
+    assert_eq!(a.session.folder_trust(), Some(Trust::Declined));
+    // Reopened: Tab then Shift+Tab goes back to Stay Restricted, and Enter stays restricted.
+    settle(&mut a, |a| a.session.disabled(CommandId::FolderTrust).is_none());
+    a.dispatch(Command::OpenFolderTrust);
+    draw(&mut a, 100, 24);
+    assert!(trust_open(&a));
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!trust_open(&a));
+    assert_eq!(a.session.folder_trust(), Some(Trust::Declined));
+    // Reopened: typing into the dialog puts the focus back on Stay Restricted (a Tab-indented line typed as it opens
+    // never trusts), and Shift+Tab never goes past it.
+    for (keys, then) in [(&[KeyCode::Tab, KeyCode::Char('x')][..], KeyCode::Enter), (&[KeyCode::Tab, KeyCode::Down], KeyCode::Enter), (&[KeyCode::BackTab], KeyCode::Enter)] {
+        settle(&mut a, |a| a.session.disabled(CommandId::FolderTrust).is_none());
+        a.dispatch(Command::OpenFolderTrust);
+        draw(&mut a, 100, 24);
+        for k in keys { key(&mut a, *k, if *k == KeyCode::BackTab { KeyModifiers::SHIFT } else { KeyModifiers::NONE }); }
+        key(&mut a, then, KeyModifiers::NONE);
+        assert!(!trust_open(&a));
+        assert_eq!(a.session.folder_trust(), Some(Trust::Declined), "{keys:?}");
+    }
+    // A paste does too.
+    settle(&mut a, |a| a.session.disabled(CommandId::FolderTrust).is_none());
+    a.dispatch(Command::OpenFolderTrust);
+    draw(&mut a, 100, 24);
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    a.handle(Event::Paste("\tx".into()));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.session.folder_trust(), Some(Trust::Declined));
+    // Reopened: Tab moves the focus to Trust, and Enter right after it trusts.
+    settle(&mut a, |a| a.session.disabled(CommandId::FolderTrust).is_none());
+    a.dispatch(Command::OpenFolderTrust);
+    draw(&mut a, 100, 24);
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(draw_screen(&mut a, 100, 24).contains("[Trust Enter]"), "the focused choice takes Enter");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!trust_open(&a));
+    assert_eq!(a.session.folder_trust(), Some(Trust::Trusted));
+    settle(&mut a, |_| marker.exists());
 }

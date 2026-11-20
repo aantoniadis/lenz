@@ -123,6 +123,17 @@ pub fn untrusted(mut settings: Value) -> Value {
     settings
 }
 
+/// Pyright's settings as sent for workspace `root`: a relative `pythonPath` (a file of the project) is left out unless
+/// it names a file inside `trusted`, where the project's own programs may run (`None`: nowhere; see [`untrusted`]), so
+/// that Pyright never runs an interpreter a folder the user does not trust supplies.
+pub fn sent(mut settings: Value, root: &Path, trusted: Option<&Path>) -> Value {
+    let outside = |p: &str| Path::new(p).is_relative() && !trusted.is_some_and(|t| super::provider::normalize(&root.join(p)).starts_with(t));
+    if let Some(o) = settings.as_object_mut() && o.get("pythonPath").and_then(Value::as_str).is_some_and(outside) {
+        o.remove("pythonPath");
+    }
+    settings
+}
+
 /// The configuration file Pyright reads for `root` and its `venvPath` and `venv`: `pyrightconfig.json` there, else
 /// `pyproject.toml` there with `[tool.pyright]`; a `pyproject.toml` without that section sends Pyright 1.1.414 to
 /// the nearest `pyrightconfig.json` above (seen in its log), so it does here.
@@ -427,5 +438,19 @@ mod tests {
         let path = std::env::join_paths([&bin]).unwrap();
         let line = describe(&root, &Value::Null, Some(&path), None).unwrap();
         assert!(line.contains(&format!("(Python 3.10.1 in {})", super::super::runtime::NEUTRAL)), "{line}");
+    }
+
+    /// A relative pythonPath is given to Pyright only inside the folder where the project's own programs may run.
+    #[test]
+    fn a_relative_python_path_is_sent_only_inside_the_trusted_bound() {
+        let settings = serde_json::json!({ "pythonPath": "../e/bin/python" });
+        let root = Path::new("/m/svc");
+        assert_eq!(sent(settings.clone(), root, None).get("pythonPath"), None);
+        assert_eq!(sent(settings.clone(), root, Some(Path::new("/m/svc"))).get("pythonPath"), None, "outside the trusted folder");
+        assert!(sent(settings.clone(), root, Some(Path::new("/m"))).get("pythonPath").is_some());
+        let inside = serde_json::json!({ "pythonPath": ".venv/bin/python" });
+        assert!(sent(inside.clone(), root, Some(root)).get("pythonPath").is_some());
+        let own = serde_json::json!({ "pythonPath": "/usr/bin/python3" });
+        assert!(sent(own, root, None).get("pythonPath").is_some(), "the user's own interpreter");
     }
 }

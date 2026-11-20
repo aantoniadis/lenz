@@ -112,35 +112,61 @@ with Default App, a Git checkout) run as they always do.
 
 **The dialog.** The first time Lenz would start one of these in an opened folder it has never asked about, one dialog
 asks: "Do you trust the authors of the files in this folder?". It names the folder and lists what would run there;
-whatever else is held back while it is open is added to the same dialog. Its choices:
+whatever else is held back while it is open is added to the same dialog. It asks only about the opened folder: a tool
+held back for a file outside it, or in a folder inside it that you answered for on its own, stays restricted without
+asking (open that folder to trust it). Its choices:
 
-- **Stay Restricted** (the default: Enter and Escape choose it) keeps them off;
+- **Stay Restricted** (the default: Escape chooses it, and so does Enter unless Tab moved the focus just before)
+  keeps them off;
 - **Trust** lets them run in this folder and every folder inside it;
 - **Trust Parent Folder** trusts the folder holding this one, with every folder in it (for a folder of checkouts). It is
-  not offered when that folder is the file system root or your home folder.
+  not offered when that folder is the file system root, your home folder or a folder holding it (such as `/home`), a
+  folder every account can write to (such as `/tmp`), or a folder that is not yours.
 
-In both adapters Alt+T and Alt+P choose Trust and Trust Parent Folder, or click a button (the macOS keys are
-unverified). No plain key trusts, since the dialog may open while you type. Deciding which folders
-need it reads only file names and manifests; Lenz runs nothing to decide.
+Tab and Shift+Tab move the focus between the choices, and Enter right after takes the focused one, in both adapters;
+or click a button. Any other key, typed text or a paste puts the focus back on Stay Restricted, and Shift+Tab never
+goes past it: the dialog may open while you type, and typing into it never trusts. The GUI also takes Alt+T and Alt+P
+for Trust and Trust Parent Folder (the macOS keys are unverified). The terminal has no letter for them: a terminal
+without the kitty keyboard protocol sends Alt+T as Escape then T, the same as a quick Escape followed by T. Deciding
+which folders need it reads only file names and manifests; Lenz runs nothing to decide.
 
 Your answer is remembered: a folder you keep restricted is never asked about again. Choose **Restricted** in the
 status bar, or **Folder Trust…** (Language Servers menu, F10 or Find Action, in both adapters), to open the dialog again.
 **Trust Project Tools in This Folder** and **Stop Trusting Project Tools in This Folder** stay in the same menus.
 Trusting starts what was held back at once, without reopening anything; stopping trusting stops the servers that ran
-because of it and keeps the folder restricted from then on.
+because of it and keeps the folder restricted from then on. Every open window follows an answer given in another
+window within a few seconds, and at once when you switch to it: Stop Trusting in one stops those servers in all of
+them.
 
 The answers are saved privately (`0600`) outside every checkout, under `trusted` and `declined` in
 `$XDG_CONFIG_HOME/lenz-code/providers.json`, by the folder's real path (links resolved). The nearest decision wins: a
-folder you keep restricted inside a trusted one stays restricted. With no folder open, Lenz never asks; a file inside a
-trusted folder is trusted, any other file stays restricted. Trust is per folder, not per tool.
+folder you keep restricted inside a trusted one stays restricted. An answer replaces those given before for the folders
+inside it: trusting a folder (or its parent) trusts the folders inside it that you had kept restricted, and keeping a
+folder restricted also restricts the folders inside it that you had trusted. A folder kept restricted inside a trusted
+one only keeps off the servers whose workspace is that folder: a server for the trusted folder around it serves the
+whole tree, the restricted folder's files included. With no folder open, Lenz never asks; a file inside a trusted folder
+is trusted, any other file stays restricted. Trust is per folder, not per tool.
 
 **Never above the opened folder.** Whether a folder is trusted or not, Lenz never looks above the opened folder for a
 project: not for a `Cargo.toml` workspace (nor one a manifest's `package.workspace` names there), a `go.work`, a
 `Gemfile`, a `.haml-lint.yml`, a TypeScript in `node_modules`, a `pyrightconfig.json`, or a project's own `tsc`. With
 no folder open, it looks no higher than the file's own folder, or the trusted folder holding it; that folder bounds the
-search but is never used as the workspace itself, so a lone file without a project file above it is served on its own. A Python environment
-whose tools run must be inside the opened folder, its links resolved: a `venvPath` of `..`, an absolute one or a link
-out of the folder is never run. Version checks of the servers that run in Restricted mode (and of Node.js, Java and the
+search but is never used as the workspace itself, so a lone file without a project file above it is served on its own
+(a lone file in a package's `node_modules` included). The project's own programs (a `tsc`, a Python environment's
+interpreter and formatters, an ERB or Haml formatter, its bundle and configuration) are found only inside the trusted
+folder that decides the workspace is trusted, and never above the opened folder: when you trust a folder inside an
+opened folder that is not trusted, nothing in the opened folder around it runs. A Python environment whose tools run
+must be inside that folder, its links resolved: a `venvPath` of `..`, an absolute one or a link out of the folder is
+never run, and Pyright is not given a relative `python.pythonPath` that leads out of it. haml-lint runs with Bundler
+told which Gemfile is the project's (erb_lint and Ruby LSP already are), so Bundler does not look for one above.
+
+**What the tools themselves read above it.** Lenz bounds its own lookups, but some tools look further up on their own,
+and Lenz has no setting that stops them. For example, Cargo reads `.cargo/config.toml` in every folder above the
+project and follows a `[workspace]` above it (so rust-analyzer does), RuboCop (through Ruby LSP, erb_lint or haml-lint)
+reads a `.rubocop.yml` above the project when the project has none, the go command follows a `go.work` above the
+module, Node's module lookup (typescript-language-server's TypeScript and plugins) can find `node_modules` above the
+project, and Gradle and Maven can read settings and `.mvn` configuration above it. Such files can make the tools run
+programs. Trust a folder only if you also trust the configuration in the folders above it. Version checks of the servers that run in Restricted mode (and of Node.js, Java and the
 `python3` on `PATH`) run outside the project, so that a version manager's shim (rustup, mise, pyenv) does not read the
 project's toolchain files.
 
