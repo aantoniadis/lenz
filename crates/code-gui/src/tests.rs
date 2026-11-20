@@ -6437,7 +6437,8 @@ fn recent_files_missing_rows_stay_disabled_and_delete_uses_drawn_revision(cx: &m
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-e");
     drop(v);
-    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending));
+    // Recent rows appear at once; the existence check that disables a missing one runs in the background.
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.rows.first().is_some_and(|row| row.disabled.is_some())));
     let mut v = visual(cx, &f);
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().rows[0].disabled.is_some()));
