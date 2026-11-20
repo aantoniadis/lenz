@@ -1362,7 +1362,8 @@ fn ruby_refreshes_a_changed_open_document_and_rechecks_it_after_close() {
     let changed = tail.iter().position(|m| m["method"] == "textDocument/didChange").unwrap();
     let closed = tail.iter().position(|m| m["method"] == "textDocument/didClose").unwrap();
     assert!(tail[changed + 1..closed].iter().any(|m| m["method"] == "textDocument/documentSymbol"), "refresh must follow the new text");
-    let barrier = tail.iter().position(|m| m["method"] == "rubyLsp/workspace/addons").unwrap();
+    // the opening's own barrier can land after `start` under load: only one after the change counts
+    let barrier = changed + tail[changed..].iter().position(|m| m["method"] == "rubyLsp/workspace/addons").unwrap();
     let refresh = changed + tail[changed..].iter().position(|m| m["method"] == "textDocument/documentSymbol").unwrap();
     assert!(changed < barrier && barrier < refresh, "the refresh is asked once the text is applied");
     assert!(f.s.state().results().is_none(), "the internal reply must not open a symbol panel");
