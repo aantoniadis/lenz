@@ -2,6 +2,26 @@
 use std::path::{Path, PathBuf};
 use super::{java, provider};
 
+/// Starts `command`, again a few times while its program is "Text file busy" (ETXTBSY): a file Lenz Code or an
+/// installer has just written stays open for writing in any child another thread forked meanwhile, until that child
+/// execs. Every other error is returned at once.
+pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    retry_busy(|| command.spawn(), std::thread::sleep)
+}
+
+/// `attempt` up to five times while it fails with ETXTBSY, waiting 15, 30, 60 then 120 ms (225 ms in all) between.
+fn retry_busy<T>(mut attempt: impl FnMut() -> std::io::Result<T>, mut wait: impl FnMut(std::time::Duration)) -> std::io::Result<T> {
+    let mut delay = std::time::Duration::from_millis(15);
+    for _ in 1..5 {
+        match attempt() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => wait(delay),
+            done => return done,
+        }
+        delay *= 2;
+    }
+    attempt()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
@@ -171,7 +191,7 @@ pub fn run_args_in(path: &Path, args: &[&str], env: &[(String, String)], cwd: Op
     if let Some(cwd) = cwd { command.current_dir(cwd); }
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|e| format!("Cannot run {} {flags}: {e}", path.display()))?;
+    let mut child = spawn(&mut command).map_err(|e| format!("Cannot run {} {flags}: {e}", path.display()))?;
     fn capture(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
         let (send, recv) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -238,7 +258,7 @@ pub fn run_with_input_env(path: &Path, args: &[String], input: &str, cwd: &Path,
     command.args(args).envs(env.iter().map(|(k, v)| (k, v))).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|e| format!("cannot run {}: {e}", path.display()))?;
+    let mut child = spawn(&mut command).map_err(|e| format!("cannot run {}: {e}", path.display()))?;
     let (Some(mut stdin), Some(mut stdout), Some(mut stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
         super::kill_group(&mut child);
         let _ = child.wait();
@@ -296,6 +316,37 @@ mod tests {
             .arg(&temporary).status().unwrap().success());
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(temporary, path).unwrap();
+    }
+
+    fn busy<T>() -> std::io::Result<T> { Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy)) }
+
+    #[test]
+    fn busy_starts_are_retried_with_backoff_and_other_errors_are_not() {
+        let (mut tries, mut waited) = (0, Vec::new());
+        let started = retry_busy(|| { tries += 1; if tries < 3 { busy() } else { Ok(tries) } }, |d| waited.push(d.as_millis()));
+        assert_eq!((started.unwrap(), waited), (3, vec![15, 30]));
+        let (mut tries, mut waited) = (0, Vec::new());
+        let error = retry_busy(|| { tries += 1; busy::<()>() }, |d| waited.push(d.as_millis())).unwrap_err();
+        assert_eq!((error.kind(), tries, waited), (std::io::ErrorKind::ExecutableFileBusy, 5, vec![15, 30, 60, 120]));
+        let mut tries = 0;
+        let error = retry_busy(|| { tries += 1; Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound)) }, |_| panic!("no wait")).unwrap_err();
+        assert_eq!((error.kind(), tries), (std::io::ErrorKind::NotFound, 1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_script_still_open_for_writing_starts_once_it_is_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server");
+        let mut file = std::fs::File::create(&script).unwrap();
+        std::io::Write::write_all(&mut file, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = std::process::Command::new(&script);
+        command.stdin(std::process::Stdio::null());
+        assert_eq!(command.spawn().unwrap_err().kind(), std::io::ErrorKind::ExecutableFileBusy, "busy while open for writing");
+        let closer = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(40)); drop(file); });
+        assert!(spawn(&mut command).unwrap().wait().unwrap().success());
+        closer.join().unwrap();
     }
 
     #[test]

@@ -87,8 +87,7 @@ fn validate(path: &Path) -> Result<PathBuf, String> {
         .stderr(Stdio::null());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = cmd
-        .spawn()
+    let mut child = super::runtime::spawn(&mut cmd)
         .map_err(|e| format!("Cannot run {} -version: {e}", path.display()))?;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {

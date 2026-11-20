@@ -116,7 +116,7 @@ fn process(program: &Path, args: &[String], env: &[(String,String)], dir: &Path,
     command.args(args).envs(env.iter().map(|(k,v)| (k,v))).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|why| format!("Cannot start {}: {why}", program.display()))?;
+    let mut child = super::runtime::spawn(&mut command).map_err(|why| format!("Cannot start {}: {why}", program.display()))?;
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let mut readers = Vec::new();
     for pipe in [child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>), child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>)].into_iter().flatten() {

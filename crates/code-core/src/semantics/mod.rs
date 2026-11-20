@@ -2648,7 +2648,7 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
         let spawned = {
             let Ok(mut p) = process.lock() else { return };
             if p.stopped { return; }
-            command.spawn().map(|mut child| {
+            runtime::spawn(&mut command).map(|mut child| {
                 let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
                 p.child = Some(child);
                 pipes
