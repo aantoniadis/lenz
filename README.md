@@ -169,7 +169,7 @@ Linux tarballs include the logo and two desktop entries, **Lenz Code** (`lenz.de
 
 ## Build
 
-Needs a stable Rust toolchain and git 2.30 or later at runtime.
+Needs a stable Rust toolchain and git 2.30 or later at runtime. Before git 2.35, `merge.conflictStyle=zdiff3` is refused by git itself, in its merges as in the Merge View and Re-open, which then show git's error.
 
 ### Command family
 
