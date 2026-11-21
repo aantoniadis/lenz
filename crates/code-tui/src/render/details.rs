@@ -49,9 +49,9 @@ impl App {
                 b(label, if focused { "Enter" } else if c == code_core::session::TrustChoice::StayRestricted { "Esc" } else { "Tab" }, false, false)
             }).collect(),
             Details::Change => vec![b("Show Diff", "d", false, false), b("Revert Change", "r", false, true), close()],
-            Details::Sql => vec![b("SQL menu", "m", false, false), b("Copy", "Ctrl+C", false, false), close()],
-            Details::Commit => vec![b("Show Diff", "d", false, false), b("Copy Revision", "c", false, false), close()],
-            Details::Text => vec![b("Copy", "Ctrl+C", false, false), close()],
+            Details::Sql => vec![b("SQL menu", "m", false, false), b(self.copy_label("Copy"), "Ctrl+C", false, false), close()],
+            Details::Commit => vec![b("Show Diff", "d", false, false), b(self.copy_label("Copy Revision"), "c", false, false), close()],
+            Details::Text => vec![b(self.copy_label("Copy"), "Ctrl+C", false, false), close()],
         }
     }
 }

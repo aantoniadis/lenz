@@ -263,6 +263,8 @@ pub(crate) struct App {
     hover: Option<Hover>,
     double_shift: DoubleShift,
     pub(crate) preview_selection: Option<(TabId, PreviewSource, Selection)>,
+    /// A dialog's or the activity log's Copy just copied: its button says "Copied" until the next key or click.
+    pub(crate) copied: bool,
     pub(crate) preview_scroll: HashMap<TabId, (PreviewSource, usize)>,
 }
 impl App {
@@ -320,6 +322,7 @@ impl App {
             hover: None,
             double_shift: DoubleShift::default(),
             preview_selection: None,
+            copied: false,
             preview_scroll: HashMap::new(),
         };
         if let Some(path) = path {
@@ -681,7 +684,21 @@ impl App {
     pub fn nerd_icons(&self) -> bool {
         self.icons_override.unwrap_or_else(|| self.session.state().file_icons())
     }
+    /// `label`, or "Copied" for a Copy button that just copied.
+    pub(crate) fn copy_label(&self, label: &'static str) -> &'static str {
+        if self.copied && matches!(label, "Copy" | "Copy Revision") { "Copied" } else { label }
+    }
+
     pub fn run(&mut self, id: CommandId) {
+        if matches!(id, CommandId::CopyRevision | CommandId::CopyActivityLog | CommandId::CopyServerDetails) && self.session.disabled(id).is_none() {
+            self.run_command(id);
+            self.copied = true;
+            return;
+        }
+        self.run_command(id);
+    }
+
+    fn run_command(&mut self, id: CommandId) {
         if id == CommandId::PasteTerminalPath && let Some(command) = self.terminal_path_target.take() {
             if let Some(why) = self.session.disabled(id) { return self.dispatch(Command::Notice(why.into())); }
             match command {
@@ -1275,7 +1292,7 @@ impl App {
             }
             Prompt::LanguageServer => self.session.language_server_rows().into_iter()
                 .filter_map(|(label, action)| action.map(|id| Choice {
-                    label,
+                    label: if self.copied && id == CommandId::CopyServerDetails { "Copied".into() } else { label },
                     detail: None,
                     section: None,
                     disabled: self.session.disabled(id),
@@ -1494,6 +1511,10 @@ impl App {
         })
     }
     pub fn handle(&mut self, event: Event) -> bool {
+        // "Copied" lasts until the next key or click (the terminal redraws only on input).
+        if matches!(&event, Event::Key(k) if k.kind == KeyEventKind::Press) || matches!(&event, Event::Mouse(m) if matches!(m.kind, MouseEventKind::Down(_))) {
+            self.copied = false;
+        }
         match event {
             Event::Key(key) => {
                 // foot with a two-group layout (us,gr) reports a Shift press as Shift but its release as Caps Lock.
@@ -1810,6 +1831,7 @@ impl App {
             && control && !alt && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
             self.dispatch(Command::CopyText(body.clone()));
+            self.copied = true;
             return;
         }
         // As in the GUI: Left or Escape goes back from a group to the groups, Right opens a group.
@@ -3406,6 +3428,7 @@ impl App {
                 }
                 if self.layout.details_copy.contains(point) {
                     self.dispatch(Command::CopyText(body.clone()));
+                    self.copied = true;
                     return;
                 }
                 if self.layout.details_close.contains(point) {

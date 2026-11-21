@@ -10,7 +10,7 @@ impl App {
         if area.is_empty() { return; }
         fill(frame.buffer_mut(), area, style(p.fg, p.sidebar_bg));
         let mut x = area.right();
-        for (id, label) in [(CommandId::ToggleActivityLog, "Hide"), (CommandId::ClearActivityLog, "Clear"), (CommandId::CopyActivityLog, "Copy")] {
+        for (id, label) in [(CommandId::ToggleActivityLog, "Hide"), (CommandId::ClearActivityLog, "Clear"), (CommandId::CopyActivityLog, self.copy_label("Copy"))] {
             let width = ((label.len() + 2) as u16).min(x.saturating_sub(area.x));
             x -= width;
             let rect = Rect::new(x, area.y, width, 1);

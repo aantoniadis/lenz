@@ -1152,6 +1152,16 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
     let copy = a.layout.details_copy;
     click(&mut a, copy.x, copy.y);
     assert_eq!(a.copy.take().as_deref(), Some(copied.as_str()));
+    // The button says it copied, until the next key.
+    let label = |a: &mut App| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let r = a.layout.details_copy;
+        (r.x..r.right()).map(|x| terminal.backend().buffer()[(x, r.y)].symbol()).collect::<String>()
+    };
+    assert!(label(&mut a).contains("Copied"), "{}", label(&mut a));
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    assert!(label(&mut a).contains("Copy") && !label(&mut a).contains("Copied"));
     let close = a.layout.details_close;
     click(&mut a, close.x, close.y);
     assert!(a.modal.is_none());

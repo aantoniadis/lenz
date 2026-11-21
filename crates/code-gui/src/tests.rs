@@ -975,8 +975,10 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     draw(&mut v);
     let [copy, close] = f.view.read_with(&v, |r, _| <[_; 2]>::try_from(r.modal_layout().unwrap().details_buttons(r.char_w, &r.details_labels(Details::Text))).unwrap());
     v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into())));
+    assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Text)), ["Copied", "Close"], "Ctrl+C says it copied too");
     v.simulate_click(copy.center(), Modifiers::default());
     assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
+    assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Text)), ["Copied", "Close"], "the button says it copied");
     v.simulate_click(close.center(), Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
     let activate = |v: &mut VisualTestContext, id: CommandId| {

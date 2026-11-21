@@ -4237,6 +4237,13 @@ impl Session {
 
     /// Full, unwrapped diagnostic snapshot for display and copying in either adapter.
     pub fn language_server_details(&self) -> String {
+        let mut rows = self.server_detail_rows();
+        rows.extend(self.state.notices());
+        rows.join("\n\n")
+    }
+
+    /// Server Details without the notices, which Status Details already lists first.
+    pub(crate) fn server_detail_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         let view = self.state.provider();
         let summary = match &view {
@@ -4334,8 +4341,7 @@ impl Session {
                 self.state.semantics.settings_file().display()
             ),
         );
-        rows.extend(self.state.notices());
-        rows.join("\n\n")
+        rows
     }
 
     /// The context menu for the active tab: navigation and copying for text; for an image or a Markdown preview

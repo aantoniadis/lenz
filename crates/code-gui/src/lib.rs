@@ -277,6 +277,9 @@ pub struct ReaderView {
     pub(crate) crumb_hits: Vec<CrumbHit>,
     /// The breadcrumb bar has the keys: its pane and highlighted crumb.
     pub(crate) crumb_focus: Option<(u8, usize)>,
+    /// When a dialog's or the activity log's Copy last copied: its button says "Copied" for [`COPIED_SHOWN`].
+    copied: Option<std::time::Instant>,
+    copied_clear: Option<gpui::Task<()>>,
     /// The pointer over a blame column; what it is over is found when drawn (it follows scrolling).
     ann_hover: Option<gpui::Point<Pixels>>,
     /// For tests: worktrees Open in New Window was asked for (a real window is not opened).
@@ -817,7 +820,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, drag_scroll: (0.0, 0.0, 0.0, 0.0), drag_ticking: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, branch_hits_valid: false, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_modal_icons: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, drag_scroll: (0.0, 0.0, 0.0, 0.0), drag_ticking: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, branch_hits_valid: false, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, copied: None, copied_clear: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_modal_icons: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -967,6 +970,7 @@ impl ReaderView {
 
     /// Close the open modal and its core search or runtime dialog.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
+        self.copied = None;
         self.cancel_field_native();
         self.popup_fields.clear();
         self.modal_seen.set(None);
@@ -1303,7 +1307,31 @@ impl ReaderView {
     }
 
     /// Run a catalog command, unless it is disabled now. Every [`CommandId`] is handled here.
+    /// Say "Copied" on the Copy button just used, then go back to "Copy".
+    pub(crate) fn mark_copied(&mut self, cx: &mut Context<Self>) {
+        self.copied = Some(std::time::Instant::now());
+        self.copied_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_SHOWN).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+        cx.notify();
+    }
+
+    /// `label`, or "Copied" for a Copy button that just copied.
+    pub(crate) fn copy_label(&self, label: &'static str) -> &'static str {
+        let fresh = self.copied.is_some_and(|t| t.elapsed() < COPIED_SHOWN);
+        if fresh && matches!(label, "Copy" | "Copy Revision") { "Copied" } else { label }
+    }
+
     pub fn run(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(id, CommandId::CopyRevision | CommandId::CopyActivityLog | CommandId::CopyServerDetails) && self.session.disabled(id).is_none() {
+            self.run_command(id, window, cx);
+            return self.mark_copied(cx);
+        }
+        self.run_command(id, window, cx);
+    }
+
+    fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         if id == CommandId::PasteTerminalPath && let Some(command) = self.terminal_ui.path_context.take() {
             if self.session.disabled(id).is_none() {
                 match command { Ok(command) => self.dispatch(command, cx), Err(why) => self.dispatch(Command::Notice(why), cx) }
@@ -2395,6 +2423,7 @@ impl ReaderView {
                 self.run(CommandId::CopyRevision, window, cx);
             } else if copy {
                 self.dispatch(Command::CopyText(text.clone()), cx);
+                self.mark_copied(cx);
             } else if matches!(key, "escape" | "enter" | "f2") {
                 self.close_modal(cx);
             } else if let Some(l) = self.modal_layout() {
@@ -3535,10 +3564,10 @@ impl ReaderView {
                 code_core::session::TrustChoice::TrustParent => "Trust Parent Folder (Alt+P)",
             }).collect(),
             Details::Change => vec!["Show Diff (D)", "Revert This Change (R)", "Close"],
-            Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
-            Details::Text => vec!["Copy", "Close"],
+            Details::Commit => vec!["Show Diff", self.copy_label("Copy Revision"), "Close"],
+            Details::Text => vec![self.copy_label("Copy"), "Close"],
             Details::Terminal { .. } => vec![self.session.state().terminal().prompt().map_or("Confirm", |p| p.accept), "Cancel"],
-            Details::Sql => vec!["SQL menu (M)", "Copy", "Close"],
+            Details::Sql => vec!["SQL menu (M)", self.copy_label("Copy"), "Close"],
             Details::External => code_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Reconcile => code_core::reconcile::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Replace => code_core::save::ReplaceChoice::ALL.into_iter().map(|choice|choice.label()).collect(),
@@ -3954,7 +3983,7 @@ impl ReaderView {
                             (Details::Commit, Some(0)) => self.run(CommandId::ShowCommitDiff, window, cx),
                             (Details::Commit, Some(1)) => self.run(CommandId::CopyRevision, window, cx),
                             (Details::Sql, Some(0)) => self.modal = Some(Modal::CommandGroup { group: CommandGroup::Sql, at: 1 }),
-                            (Details::Text, Some(0)) | (Details::Sql, Some(1)) => self.dispatch(Command::CopyText(text), cx),
+                            (Details::Text, Some(0)) | (Details::Sql, Some(1)) => { self.dispatch(Command::CopyText(text), cx); self.mark_copied(cx); }
                             (_, Some(_)) => self.close_modal(cx),
                             (_, None) => {}
                         }
@@ -5768,7 +5797,10 @@ impl ReaderView {
     }
 
     fn server_rows(&self) -> Vec<(String, Option<CommandId>)> {
-        self.session.language_server_rows()
+        let copied = self.copied.is_some_and(|t| t.elapsed() < COPIED_SHOWN);
+        self.session.language_server_rows().into_iter()
+            .map(|(label, id)| if copied && id == Some(CommandId::CopyServerDetails) { ("Copied".into(), id) } else { (label, id) })
+            .collect()
     }
 
     fn branch_hint(&self) -> String {
@@ -7383,6 +7415,9 @@ fn paint_symbol(window: &mut Window, id: CommandId, cx: f32, cy: f32, shown: boo
         }
     }
 }
+
+/// How long a Copy button says "Copied" after copying.
+const COPIED_SHOWN: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// One segment's width in the file's source/preview switch.
 const SWITCH_W: f32 = 26.0;

@@ -1001,6 +1001,23 @@ fn status_follows_the_switched_to_tab_while_its_text_loads() {
     }
 }
 
+/// Status Details names the server and each notice once: the notice first, the server's summary in its section.
+#[test]
+fn status_details_lists_each_notice_and_the_server_once() {
+    let mut f = fixture(&[], &[("src/main.rs", MAIN)]);
+    f.open("src/main.rs");
+    f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
+    f.s.dispatch(Command::Notice("Definition: no definition here".into()));
+    let details = f.s.status_details();
+    let paragraphs: Vec<&str> = details.split("\n\n").collect();
+    let summary = f.s.state().provider().unwrap().summary();
+    assert_eq!(paragraphs.iter().filter(|p| **p == summary).count(), 1, "{details}");
+    assert_eq!(paragraphs.iter().filter(|p| **p == "Definition: no definition here").count(), 1, "{details}");
+    assert_eq!(paragraphs.first(), Some(&"Definition: no definition here"));
+    // Server Details on its own still ends with the notice.
+    assert!(f.s.language_server_details().ends_with("Definition: no definition here"));
+}
+
 /// A load that is still running after a moment is named, by the file's name only; a quick one never is.
 #[test]
 fn only_a_slow_load_is_named_in_the_status_bar() {

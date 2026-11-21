@@ -285,8 +285,8 @@ impl Session {
             .chain(state.terminal().active().map(|tab| format!("{} — {}\nInitial directory: {}\n{} terminal tabs{}", tab.label(), tab.status(), tab.cwd().display(), state.terminal().tabs().len(), tab.error().map_or(String::new(), |why| format!("\n{why}")))))
             .chain(image)
             .chain(project)
-            .chain(state.provider().map(|p| p.summary()))
-            .chain([self.language_server_details()])
+            // Server Details opens with the server's summary; the notices are already first.
+            .chain(self.server_detail_rows())
             .collect::<Vec<_>>()
             .join("\n\n")
     }

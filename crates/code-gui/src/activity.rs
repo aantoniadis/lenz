@@ -43,7 +43,7 @@ impl ReaderView {
         let top = self.height - self.status_h() - self.activity_height();
         let bounds = Bounds { origin: point(px(0.0), px(top)), size: size(px(self.width), px(height)) };
         let mut right = self.width;
-        let buttons = [(CommandId::ToggleActivityLog, "Hide"), (CommandId::ClearActivityLog, "Clear"), (CommandId::CopyActivityLog, "Copy")].into_iter().map(|(id, label)| {
+        let buttons = [(CommandId::ToggleActivityLog, "Hide"), (CommandId::ClearActivityLog, "Clear"), (CommandId::CopyActivityLog, self.copy_label("Copy"))].into_iter().map(|(id, label)| {
             let width = ((label.len() + 2) as f32 * self.char_w).min(right.max(0.0));
             right -= width;
             (Bounds { origin: point(px(right), px(top)), size: size(px(width), px(line_h())) }, id, label)
