@@ -6606,6 +6606,12 @@ impl Session {
     }
 
     fn ask_ready(&mut self, doc: Arc<Document>, offset: usize, ask: Ask, request: u64) -> Effect {
+        // `this` names the class around it: land on that class's name, as IntelliJ does (JDT LS answers nothing).
+        if ask == Ask::Definition && let Some(name) = self.this_target(&doc, offset) {
+            self.state.asking = None;
+            let hit = semantics::hit_at(doc.source(), &doc, name.start, name.end);
+            return self.open_at(doc.source().to_owned(), &hit, None, doc);
+        }
         if let Ask::TypeHierarchy(direction) = ask
             && !self.state.semantics.view(&doc).is_some_and(|v| v.offers(semantics::Question::PrepareTypeHierarchy))
         {
@@ -6625,6 +6631,26 @@ impl Session {
             }
         }
         Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
+    /// For `this` at `offset` (in a language where it names the enclosing class), that class's name, from the parse the
+    /// document's tab holds for this version (for breadcrumbs and sticky scroll, both on by default). `None`: not
+    /// `this`, or no current parse (the server is asked as for any name). shortcut: an anonymous class's `this` lands
+    /// on the named class around it; upgrade when declarations record anonymous classes.
+    fn this_target(&self, doc: &Document, offset: usize) -> Option<std::ops::Range<usize>> {
+        use highlight::Language as L;
+        if !matches!(doc.language()?, L::Java | L::Kotlin | L::JavaScript | L::TypeScript | L::Tsx | L::CSharp | L::Cpp) { return None; }
+        let line = doc.line_of(offset);
+        let (start, text) = (doc.line_range(line).start, doc.line(line));
+        let col = offset - start;
+        let word = crate::document::identifier(text, col).or_else(|| col.checked_sub(1).filter(|c| text.is_char_boundary(*c)).and_then(|c| crate::document::identifier(text, c)))?;
+        if text.get(word.clone()) != Some("this") { return None; }
+        let tab = self.state.tabs.iter().find(|t| t.source == doc.source() && t.read_only_side().is_none())?;
+        let view = self.state.view(tab.id)?;
+        if view.snapshot().key().version != doc.version() { return None; }
+        let class = view.declarations()?.enclosing((start + word.start) as u32).into_iter().rev()
+            .find(|d| matches!(d.kind, lenz_content::highlight::DeclKind::Type | lenz_content::highlight::DeclKind::Interface))?;
+        Some(class.name_range.start as usize..class.name_range.end as usize)
     }
 
     /// A type hierarchy built from usages and syntax (the server offers none): the name at `offset` is the root.

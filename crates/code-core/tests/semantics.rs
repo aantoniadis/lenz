@@ -2000,6 +2000,27 @@ fn the_maven_profile_that_adds_a_files_folder_is_offered() {
     assert_eq!(code_core::semantics::maven::active_in(&xml), ["benchmarks"]);
 }
 
+/// Go to Definition on `this` lands on the class around it (as IntelliJ does), from Lenz's own parse: JDT LS answers
+/// nothing for `this`, inside the build or not, so it is not asked.
+#[test]
+fn definition_on_this_lands_on_the_enclosing_class() {
+    let source = "package demo;\n\npublic class Holder {\n    private final int value;\n\n    public Holder(int value) {\n        this.value = value;\n    }\n}\n";
+    let files = [("pom.xml", "<project/>\n"), ("src/demo/Holder.java", source)];
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_JDT", "1")], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/demo/Holder.java");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready) && s.state().active().and_then(|t| s.state().view(t.id())).is_some_and(|v| v.declarations().is_some()));
+    f.definition("this.value", false);
+    f.asked();
+    assert_eq!(f.selected_text(), "Holder");
+    assert_eq!(f.s.state().selection().unwrap().range().start, source.find("Holder {").unwrap(), "the class's name, not the constructor's");
+    assert!(!messages(&f.log).iter().any(|m| m["method"] == "textDocument/definition"), "the server is not asked about `this`");
+    // Back returns to `this`.
+    f.s.dispatch(Command::Back);
+    let at = source.find("this.value").unwrap();
+    assert!((at..at + 4).contains(&f.s.state().selection().unwrap().head), "back on `this`");
+}
+
 #[test]
 fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session() {
     let files = [("pom.xml", ""), ("src/A.java", "class A {\n    void m() { virt(); }\n}\n")];
