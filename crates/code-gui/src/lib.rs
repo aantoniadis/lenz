@@ -7127,7 +7127,7 @@ impl Render for ReaderView {
                                     // A wrapped line keeps every character, so the space it broke at leads its next line: not drawn.
                                     let line = if details_modal && !first_line { line.strip_prefix(' ').unwrap_or(line) } else { line.as_str() };
                                     // A details text line: a section heading, a labelled line (label dimmer than its value), or text.
-                                    let detail = (details_modal && first_line).then(|| code_core::chrome::detail_line(n.checked_sub(1).map(|p| l.lines[p].1.as_str()), line)).unwrap_or(code_core::chrome::DetailLine::Plain);
+                                    let detail = if details_modal && first_line { code_core::chrome::detail_line(n.checked_sub(1).map(|p| l.lines[p].1.as_str()), line) } else { code_core::chrome::DetailLine::Plain };
                                     let section = (branch_chooser || commands_modal) && *row == usize::MAX || detail == code_core::chrome::DetailLine::Heading;
                                     let heading = Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
                                     // A row with a file-type icon (New Scratch File's kinds): the icon, then its text.

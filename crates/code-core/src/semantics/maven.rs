@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 const POM_LIMIT: u64 = 1 << 20;
 
 /// Parsed files by path, kept while their modification time and size stay: menus ask on every frame they are shown.
-pub struct Cache<T>(std::cell::RefCell<std::collections::HashMap<PathBuf, (Option<(std::time::SystemTime, u64)>, T)>>);
+pub struct Cache<T>(std::cell::RefCell<std::collections::HashMap<PathBuf, (FileStamp, T)>>);
+
+/// A file's modification time and size, when it could be read.
+type FileStamp = Option<(std::time::SystemTime, u64)>;
 
 impl<T> Default for Cache<T> { fn default() -> Self { Self(Default::default()) } }
 
