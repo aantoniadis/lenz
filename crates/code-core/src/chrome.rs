@@ -149,6 +149,10 @@ impl Session {
         {
             return provider_message(provider);
         }
+        // Checked for syntax only: say so while nothing more specific is shown.
+        if let Some(outside) = state.outside_build() {
+            return if outside.no_project { "Not in any project: syntax errors only · F2 for details".into() } else { "Outside the build's source folders: syntax errors only · F2 for details".into() };
+        }
         if let Some(status) = state.active().and_then(|tab| tab.blame_status()) {
             match status {
                 crate::blame::Status::Pending => return "Blame pending…".into(),

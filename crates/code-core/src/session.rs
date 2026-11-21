@@ -2798,6 +2798,10 @@ impl State {
         let (provider, Some(Some(root))) = self.semantics.resolved_source(self.current_source()?.source_meta())? else { return None };
         Some((provider, root))
     }
+    /// The active file is outside its language server's build, which checks it for syntax only (JDT LS).
+    pub fn outside_build(&self) -> Option<&semantics::Outside> {
+        self.semantics.outside_build(self.current_source()?.source())
+    }
     /// Compact status shown before paths and other notices so setup failures remain visible.
     pub fn language_server_label(&self) -> String {
         let open = self.current_source().is_some() || self.active().is_some_and(Tab::is_file);
@@ -4253,8 +4257,16 @@ impl Session {
             None => "Open a source file to start its language server automatically.".into(),
         };
         rows.push(summary);
-        // Right below its status: the reason it may not be working.
-        // Its first line (a stack trace's message); the whole text is in Logs.
+        // The file itself is outside the build: what the server said and how to bring it in.
+        if let Some(outside) = self.state.outside_build() {
+            rows.push(format!("{}.\n{}", outside.message.trim_end_matches('.'), if outside.no_project {
+                "Open the folder of the project that contains it, or add it to a project's build, for navigation, completion and full checks."
+            } else {
+                "Its folder is not a source folder of the build. Add it in pom.xml or build.gradle (or activate the Maven profile that adds it) for navigation, completion and full checks."
+            }));
+        }
+        // Right below its status: the reason it may not be working. Its first line (a stack trace's message); the
+        // whole text is in Logs.
         if let Some(error) = view.as_ref().and_then(|v| v.error.as_ref()) {
             let first = error.lines().next().unwrap_or_default();
             let more = if error.lines().nth(1).is_some() { " Its full text is in Logs." } else { "" };

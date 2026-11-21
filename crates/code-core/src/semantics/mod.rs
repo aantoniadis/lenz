@@ -302,6 +302,15 @@ pub enum Status {
     Restricted(&'static str),
 }
 
+/// A file a server checks for syntax only, because it is outside the server's build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outside {
+    /// The server's own words.
+    pub message: String,
+    /// In no project at all, rather than outside the project's source folders.
+    pub no_project: bool,
+}
+
 /// A provider's state for one workspace, for presentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderView {
@@ -567,6 +576,9 @@ struct Server {
     /// The diagnostics last published for each open document, for the version they describe.
     diagnostics: HashMap<PathBuf, Arc<diagnostics::FileDiagnostics>>,
     published_problems: HashMap<PathBuf, (Option<u64>, Vec<diagnostics::PublishedDiagnostic>)>,
+    /// Files it checks for syntax only, being outside its build (JDT LS): what it said, and whether the file is in no
+    /// project at all rather than outside the project's source folders.
+    outside: HashMap<PathBuf, Outside>,
     /// `textDocument/diagnostic` requests in flight (a server that is asked rather than publishing), by id, with the
     /// exact text each asks about.
     pulls: HashMap<i64, Arc<Document>>,
@@ -609,6 +621,8 @@ struct Server {
     initialized_at: Option<std::time::Instant>,
     /// Since when it has been indexing again after being ready.
     reindexing: Option<std::time::Instant>,
+    /// JDT LS is re-importing its project: open documents are reopened once it ends.
+    reimporting: bool,
     memory: Option<(u64, u64)>,
     /// The server's semantic token legend (empty without one).
     legend: Arc<Legend>,
@@ -1030,7 +1044,7 @@ impl Semantics {
             process,
             next_id: 0,
             initializing: None,
-            open: HashMap::new(), desired: HashMap::new(), written: HashMap::new(), diagnostics: HashMap::new(), published_problems: HashMap::new(), pulls: HashMap::new(), settling: None, settle_waits: 0, unpulled: Default::default(), gems_request: None, gems: None, gem_index: Default::default(),
+            open: HashMap::new(), desired: HashMap::new(), written: HashMap::new(), diagnostics: HashMap::new(), published_problems: HashMap::new(), outside: HashMap::new(), pulls: HashMap::new(), settling: None, settle_waits: 0, unpulled: Default::default(), gems_request: None, gems: None, gem_index: Default::default(),
             flights: HashMap::new(), open_epoch: HashMap::new(), next_text: 0, text_bytes: 0,
             desired_epoch: 0, deferred: HashMap::new(), failed: HashMap::new(), refresh: Default::default(),
             dirty_open: HashMap::new(),
@@ -1042,6 +1056,7 @@ impl Semantics {
             idle_since: None,
             initialized_at: None,
             reindexing: None,
+            reimporting: false,
             memory: None,
             legend: Default::default(),
             asked: Default::default(),
@@ -1277,6 +1292,11 @@ impl Semantics {
     }
 
     /// The diagnostics an initialized server last published for `path`, for the version they describe.
+    /// Whether a server checks `path` for syntax only, being outside its build (see [`Outside`]).
+    pub fn outside_build(&self, path: &Path) -> Option<&Outside> {
+        self.servers.iter().filter(|s| s.initialized()).find_map(|s| s.outside.get(path))
+    }
+
     pub fn diagnostics(&self, path: &Path) -> Option<Arc<diagnostics::FileDiagnostics>> {
         // A shell script's problems are ShellCheck's, as Lenz runs it; never bash-language-server's.
         if self.shell.checks(path) { return self.shell.latest(path)?.diagnostics.clone(); }
@@ -1645,7 +1665,15 @@ impl Semantics {
     /// Ruby LSP also indexes previously unknown files on Changed. Directory events are expanded by the session.
     pub fn files_changed(&mut self, changes: &[(PathBuf, bool)]) {
         for s in &mut self.servers {
-            for (path, exists) in changes { if !exists { s.published_problems.remove(path); s.diagnostics.remove(path); } }
+            for (path, exists) in changes { if !exists { s.published_problems.remove(path); s.diagnostics.remove(path); s.outside.remove(path); } }
+        }
+        // Build files reach a server that re-imports from them (JDT LS) though it watches nothing else through Lenz.
+        for s in self.servers.iter_mut().filter(|s| s.initialized() && !PROVIDERS[s.key.provider].watched_files && !PROVIDERS[s.key.provider].build_files.is_empty()) {
+            let builds = PROVIDERS[s.key.provider].build_files;
+            let events: Vec<Value> = changes.iter()
+                .filter(|(p, _)| p.starts_with(&s.key.root) && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| builds.contains(&n)))
+                .map(|(p, exists)| json!({ "uri": lsp::file_uri(p), "type": if *exists { 2 } else { 3 } })).collect();
+            if !events.is_empty() { s.notify("workspace/didChangeWatchedFiles", json!({ "changes": events })); }
         }
         for s in self.servers.iter_mut().filter(|s| s.initialized() && PROVIDERS[s.key.provider].watched_files) {
             let events: Vec<Value> = changes.iter().filter(|(p, _)| p.starts_with(&s.key.root)).map(|(p, exists)| json!({ "uri": lsp::file_uri(p), "type": if *exists { 2 } else { 3 } })).collect();
@@ -2056,6 +2084,28 @@ impl Server {
         let _ = self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
+    /// Forget `path` as open and tell the server it closed.
+    fn close_document(&mut self, path: &Path) {
+        self.open.remove(path);
+        self.written.remove(path);
+        self.diagnostics.remove(path);
+        self.open_epoch.remove(path);
+        self.refresh.remove(path);
+        self.asked.iter_mut().for_each(|a| { a.remove(path); });
+        self.decor.retain(|_, d| d.0 != path);
+        // The close stays after any in-flight old text and before a future reopen. Its credit
+        // remains outstanding, including when the same URI returns before the acknowledgement.
+        self.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::file_uri(path) } }));
+    }
+
+    /// After JDT LS re-imported its project, open files keep their old project's errors (a wrong package, unresolved
+    /// types) until reopened: close each, then open the wanted ones again.
+    fn reopen_documents(&mut self) {
+        let open: Vec<PathBuf> = self.open.keys().cloned().collect();
+        for path in open { self.close_document(&path); }
+        self.pump_text();
+    }
+
     fn refresh_index(&mut self, path: &Path) {
         // Ruby LSP indexes open-file changes during document requests; watcher reports alone are ignored.
         if PROVIDERS[self.key.provider].id != "ruby-lsp" || !self.supports(Question::FileSymbols) { return; }
@@ -2083,16 +2133,7 @@ impl Server {
         }
         let gone: Vec<PathBuf> = self.open.keys().filter(|p| !docs.contains_key(*p)).cloned().collect();
         for path in gone {
-            self.open.remove(&path);
-            self.written.remove(&path);
-            self.diagnostics.remove(&path);
-            self.open_epoch.remove(&path);
-            self.refresh.remove(&path);
-            self.asked.iter_mut().for_each(|a| { a.remove(&path); });
-            self.decor.retain(|_, d| d.0 != path);
-            // The close stays after any in-flight old text and before a future reopen. Its credit
-            // remains outstanding, including when the same URI returns before the acknowledgement.
-            self.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::file_uri(&path) } }));
+            self.close_document(&path);
             if let Some(exists) = self.dirty_open.remove(&path) {
                 self.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": lsp::file_uri(&path), "type": if exists { 2 } else { 3 } }] }));
             }
@@ -2353,6 +2394,14 @@ impl Server {
             // Kept only for the exact text the server was sent; a version it was not sent is dropped, not misplaced.
             "textDocument/publishDiagnostics" => {
                 let Some(path) = params["uri"].as_str().and_then(lsp::uri_path) else { return Outcome::default() };
+                // JDT LS 1.63: code "32" "X is not on the classpath of project P, only syntax errors are reported",
+                // code "16" "X is a non-project file, only syntax errors are reported" (source "Java", line 0).
+                let outside = params["diagnostics"].as_array().into_iter().flatten().find_map(|d| {
+                    let code = d["code"].as_str().or(None).map(str::to_owned).or_else(|| d["code"].as_u64().map(|c| c.to_string()))?;
+                    (d["source"].as_str() == Some("Java") && matches!(code.as_str(), "32" | "16"))
+                        .then(|| Outside { message: d["message"].as_str().unwrap_or_default().chars().take(300).collect(), no_project: code == "16" })
+                });
+                match outside { Some(o) => { self.outside.insert(path.clone(), o); } None => { self.outside.remove(&path); } }
                 // Its reply can be read before the writer reports the text written: the frame still in flight is it.
                 let version = params["version"].as_u64();
                 if params.get("version").filter(|v| !v.is_null()).is_some_and(|_| version.is_none()) { return Outcome::default(); }
@@ -2384,6 +2433,14 @@ impl Server {
             "language/status" => match params["type"].as_str() {
                 Some("ServiceReady" | "Started") => self.busy = false,
                 Some("Starting") => self.busy = true,
+                // "Updating demo configuration" / "Updating project configurations...": a re-import, which the next
+                // ProjectStatus OK ends (one also comes at every start, which reopens nothing).
+                Some("Message") if params["message"].as_str().is_some_and(|m| m.starts_with("Updating")) => { self.reimporting = true; return Outcome::default(); }
+                Some("ProjectStatus") if self.reimporting => {
+                    self.reimporting = false;
+                    self.reopen_documents();
+                    return Outcome { repaint: true, ..Outcome::default() };
+                }
                 Some("Error") => {
                     notices.push(format!("{}: {}", PROVIDERS[self.key.provider].name, params["message"].as_str().unwrap_or_default()));
                     return Outcome { repaint: true, ..Outcome::default() };

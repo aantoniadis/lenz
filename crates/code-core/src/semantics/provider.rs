@@ -66,6 +66,9 @@ pub struct Provider {
     /// It relies on the client to report files changed on disk that it does not hold open (else it watches them
     /// itself, and is not told).
     pub watched_files: bool,
+    /// Build files (by name) whose changes it is told about although it does not rely on the client for other files:
+    /// JDT LS re-imports its project from them.
+    pub build_files: &'static [&'static str],
     /// Extensions of files it navigates into that no provider reads (Ruby LSP's RBS signatures): their origin is
     /// this provider's.
     pub navigates: &'static [&'static str],
@@ -162,6 +165,7 @@ const DEFAULT: Provider = Provider {
     root_env: |_, _, _, _, _| Ok(Vec::new()),
     utf8: true,
     watched_files: false,
+    build_files: &[],
     navigates: &[],
     bundled: None,
     locate: None,
@@ -289,7 +293,7 @@ Provider {
     // Its launcher has no version flag (it would start the server); it names its version when initialized.
     version: Version::Initialize,
     tested: Some("1.61.0"),
-    setup: "Install Eclipse JDT LS (a `jdtls` launcher; it needs Python 3 and Java 21 or newer, from JAVA_HOME or PATH) so that `jdtls` is on PATH, or set its `executable` and `env` (PATH, JAVA_HOME) in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
+    setup: "Install Eclipse JDT LS (a `jdtls` launcher; it needs Python 3 and Java 21 or newer, Java 25 or newer from JDT LS 1.63, from JAVA_HOME or PATH) so that `jdtls` is on PATH, or set its `executable` and `env` (PATH, JAVA_HOME) in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
     root: java_root,
     no_root: "no Java project encloses this file; set a workspace root",
     origins: &[("/.m2/repository/", "a Maven dependency"), ("/.gradle/caches/", "a Gradle dependency")],
@@ -297,9 +301,12 @@ Provider {
     // reader never builds: no build output. JDT LS answers parameter information only when the client turns it on.
     initialization: || json!({
         "extendedClientCapabilities": { "classFileContentsSupport": true },
-        "settings": { "java": { "autobuild": { "enabled": false }, "signatureHelp": { "enabled": true, "description": { "enabled": true } } } },
+        // A changed build file re-imports the project without asking (JDT LS would otherwise prompt); the user's
+        // `java.configuration.updateBuildConfiguration` wins.
+        "settings": { "java": { "autobuild": { "enabled": false }, "configuration": { "updateBuildConfiguration": "automatic" }, "signatureHelp": { "enabled": true, "description": { "enabled": true } } } },
     }),
     config_section: "java",
+    build_files: &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties"],
     reports_status: true,
     workspace_data: Some("-data"),
     virtual_contents: Some("java/classFileContents"),

@@ -683,6 +683,34 @@ fn edits_are_declined_and_initialization_is_not_readiness() {
     assert!(f.notice("it may still be loading or indexing its workspace"), "{:?}", f.s.state().notices());
 }
 
+/// A file JDT LS checks for syntax only, being outside the build's source folders (its diagnostic code "32"), says so
+/// in the status bar and Server Details, until a publication without it.
+#[test]
+fn a_file_outside_the_build_says_so_until_the_server_takes_it_back() {
+    let mut f = fixture(&[], &[("src/main.rs", MAIN)]);
+    f.open("src/main.rs");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
+    let uri = format!("file://{}", f.root.join("src/main.rs").display());
+    let mut publish = |items: Value| f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"textDocument/publishDiagnostics", "params":{"uri":uri, "diagnostics":items}}),
+    }));
+    publish(serde_json::json!([{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":2,"code":"32","source":"Java","message":"main.rs is not on the classpath of project demo, only syntax errors are reported"}]));
+    f.s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 3, column: Some(1) }));
+    assert!(f.s.state().outside_build().is_some_and(|o| !o.no_project));
+    assert_eq!(f.s.status_message(), "Outside the build's source folders: syntax errors only · F2 for details");
+    let details = f.s.language_server_details();
+    assert!(details.contains("main.rs is not on the classpath of project demo, only syntax errors are reported.\nIts folder is not a source folder of the build."), "{details}");
+    // Brought into the build: the next publication has no such diagnostic.
+    let uri = format!("file://{}", f.root.join("src/main.rs").display());
+    f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"textDocument/publishDiagnostics", "params":{"uri":uri, "diagnostics":[]}}),
+    }));
+    assert!(f.s.state().outside_build().is_none());
+    assert_ne!(f.s.status_message(), "Outside the build's source folders: syntax errors only · F2 for details");
+}
+
 /// A ready server indexing for a moment around a request (jdtls validates documents) is not still loading: an
 /// empty answer says only that nothing was found.
 #[test]
@@ -1871,6 +1899,42 @@ fn a_selected_name_is_asked_about_at_its_start() {
     f.asked();
     let positions: Vec<u64> = messages(&f.log).iter().filter(|m| m["method"] == "textDocument/references").map(|m| m["params"]["position"]["character"].as_u64().unwrap()).collect();
     assert_eq!(positions, [at as u64, at as u64], "either direction: the name's start, never past its end");
+}
+
+/// JDT LS re-imports from its build files: a changed pom.xml reaches it (other files do not, as it does not rely on
+/// Lenz for them), it is asked to update without prompting, and when its re-import ends (an "Updating …" status, then
+/// ProjectStatus) open files are reopened so they lose the old project's errors.
+#[test]
+fn jdtls_hears_of_build_file_changes_and_open_files_are_reopened_after_a_reimport() {
+    let files = [("pom.xml", "<project/>\n"), ("src/A.java", "class A {}\n")];
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_JDT", "1")], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/A.java");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
+    let initialize = messages(&f.log).into_iter().find(|m| m["method"] == "initialize").unwrap();
+    assert_eq!(initialize["params"]["initializationOptions"]["settings"]["java"]["configuration"]["updateBuildConfiguration"], "automatic");
+    std::fs::write(f.root.join("pom.xml"), "<project><!-- changed --></project>\n").unwrap();
+    f.s.dispatch(Completion::Changed(code_core::watch::Change { paths: [f.root.join("pom.xml"), f.root.join("src/A.java")].into_iter().collect(), ..Default::default() }));
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().any(|m| m["method"] == "workspace/didChangeWatchedFiles"));
+    let watched: Vec<Value> = messages(&f.log).into_iter().filter(|m| m["method"] == "workspace/didChangeWatchedFiles").collect();
+    assert_eq!(watched.len(), 1, "{watched:?}");
+    assert_eq!(watched[0]["params"]["changes"].as_array().unwrap().len(), 1, "only the build file: {watched:?}");
+    assert!(watched[0]["params"]["changes"][0]["uri"].as_str().unwrap().ends_with("/pom.xml"));
+    let status = |f: &mut Fixture, kind: &str, message: &str| f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"language/status", "params":{"type":kind, "message":message}}),
+    }));
+    let opens = |log: &Path| messages(log).iter().filter(|m| m["method"] == "textDocument/didOpen").count();
+    let before = opens(&f.log);
+    status(&mut f, "ProjectStatus", "OK");
+    assert!(!messages(&f.log).iter().any(|m| m["method"] == "textDocument/didClose"), "a status at start reopens nothing");
+    status(&mut f, "Message", "Updating proj configuration");
+    status(&mut f, "ProjectStatus", "OK");
+    let log = f.log.clone();
+    f.settle_until(move || opens(&log) > before);
+    let closed = messages(&f.log).into_iter().filter(|m| m["method"] == "textDocument/didClose").count();
+    assert_eq!(closed, 1);
 }
 
 #[test]
