@@ -219,11 +219,12 @@ impl Session {
         let position = match tab.selection().zip(view.map(|v| v.snapshot())) {
             Some((selection, document)) => {
                 let position = format!("{}:{}", document.line_of(selection.head) + 1, document.column_at(selection.head) + 1);
-                self.shown_position.borrow_mut().insert(tab.id(), position.clone());
+                self.shown_position.borrow_mut().insert(tab.id(), (tab.source.clone(), position.clone()));
                 position
             }
-            // Its text is loading (a switch or a reload, milliseconds): the caret as last drawn, not a blink.
-            None if loading && let Some(position) = self.shown_position.borrow().get(&tab.id()) => position.clone(),
+            // Its text is loading (a switch or a reload, milliseconds): its caret as last drawn, not a blink. A
+            // preview tab showing another file keeps its id, not its caret.
+            None if loading && tab.selection().is_some() && let Some((_, position)) = self.shown_position.borrow().get(&tab.id()).filter(|(source, _)| *source == tab.source) => position.clone(),
             None => format!("Line {}", tab.top_line() + 1),
         };
         self.state().vim_status().map_or_else(|| position.clone(), |mode| format!("{mode}  {position}"))

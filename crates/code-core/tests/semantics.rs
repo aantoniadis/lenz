@@ -979,6 +979,12 @@ fn status_follows_the_switched_to_tab_while_its_text_loads() {
     f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
     f.s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 2, column: Some(5) }));
     assert_eq!(f.s.status_position(), "2:5");
+    // Reading it again keeps its caret: shown as last drawn meanwhile, not "Line 1".
+    f.s.dispatch(Command::Reload);
+    assert!(f.s.state().loading().is_some());
+    assert_eq!(f.s.status_position(), "2:5");
+    f.settle(|s| s.state().loading().is_none());
+    assert_eq!(f.s.status_position(), "2:5");
     f.open("src/lib.rs");
     for (name, label, sql) in [("src/main.rs", "LSP ready", false), ("notes.md", "LSP unsupported", false), ("q.sql", "LSP unsupported", true)] {
         f.s.dispatch(Command::Open(f.root.join(name)));
@@ -986,8 +992,10 @@ fn status_follows_the_switched_to_tab_while_its_text_loads() {
         assert_eq!(f.s.state().language_server_label(), label, "{name}");
         assert_eq!(f.s.status_message(), "", "{name}");
         assert_eq!(f.s.state().sql_dialect_label().is_some(), sql, "{name}");
-        if name == "src/main.rs" { assert_eq!(f.s.status_position(), "2:5", "the caret as last drawn, not \"Line 1\""); }
+        // A preview tab showing another file keeps its id, never the other file's caret.
+        let position = f.s.status_position();
         f.settle(|s| s.state().loading().is_none());
+        assert_eq!(f.s.status_position(), position, "{name}");
         assert_eq!(f.s.state().language_server_label(), label, "{name}: unchanged once loaded");
         assert_eq!(f.s.state().sql_dialect_label().is_some(), sql, "{name}");
     }

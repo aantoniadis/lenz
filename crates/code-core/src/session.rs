@@ -3077,8 +3077,8 @@ struct LayoutIntent {
 }
 
 pub struct Session {
-    /// Each tab's caret position as the status bar last drew it, kept while its text reloads.
-    pub(crate) shown_position: std::cell::RefCell<std::collections::HashMap<TabId, String>>,
+    /// Each tab's file and caret position as the status bar last drew them, kept while its text reloads.
+    pub(crate) shown_position: std::cell::RefCell<std::collections::HashMap<TabId, (PathBuf, String)>>,
     terminals: terminal_work::Terminals,
     text_input_enabled: bool,
     vim_group_edit: bool,
