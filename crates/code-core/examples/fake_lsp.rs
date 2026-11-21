@@ -127,6 +127,10 @@ impl Fake {
     fn diagnostics(&self, text: &str) -> Vec<Value> {
         let word = |c: char| c.is_alphanumeric() || c == '_';
         let mut found = Vec::new();
+        // As JDT LS 1.63 says of every publication for a file outside the project's source folders.
+        if env("FAKE_LSP_OUTSIDE").is_some() {
+            found.push(json!({ "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } }, "severity": 2, "code": "32", "source": "Java", "message": "The file is not on the classpath of project proj, only syntax errors are reported" }));
+        }
         for (l, line) in text.split('\n').enumerate() {
             let line = line.trim_end_matches('\r');
             let mut at = 0;

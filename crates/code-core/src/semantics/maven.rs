@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 const POM_LIMIT: u64 = 1 << 20;
 
 /// Parsed files by path, kept while their modification time and size stay: menus ask on every frame they are shown.
-#[derive(Default)]
-pub struct Cache(std::cell::RefCell<std::collections::HashMap<PathBuf, (Option<(std::time::SystemTime, u64)>, Vec<String>)>>);
+pub struct Cache<T>(std::cell::RefCell<std::collections::HashMap<PathBuf, (Option<(std::time::SystemTime, u64)>, T)>>);
 
-impl Cache {
+impl<T> Default for Cache<T> { fn default() -> Self { Self(Default::default()) } }
+
+impl<T: Clone> Cache<T> {
     /// `read(path)`, or its last result while the file is unchanged.
-    pub fn get(&self, path: &Path, read: fn(&Path) -> Vec<String>) -> Vec<String> {
+    pub fn get(&self, path: &Path, read: fn(&Path) -> T) -> T {
         let stamp = std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
         let mut cache = self.0.borrow_mut();
         if let Some((seen, ids)) = cache.get(path) && *seen == stamp && stamp.is_some() { return ids.clone(); }
@@ -54,6 +55,49 @@ pub(crate) fn profiles_in(text: &str) -> Vec<String> {
         rest = after;
     }
     ids
+}
+
+/// Each profile of `pom` and the source folders it adds (`build-helper-maven-plugin`'s `<source>`, or its own
+/// `<sourceDirectory>`/`<testSourceDirectory>`), relative to the project as written, `${project.basedir}/` dropped.
+pub fn pom_profile_sources(pom: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(file) = std::fs::File::open(pom) else { return Vec::new() };
+    let mut text = String::new();
+    if std::io::Read::read_to_string(&mut std::io::Read::take(file, POM_LIMIT), &mut text).is_err() { return Vec::new(); }
+    profile_sources_in(&text)
+}
+
+pub(crate) fn profile_sources_in(text: &str) -> Vec<(String, Vec<String>)> {
+    let text = without_comments(text);
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("<profiles>") {
+        rest = &rest[at + "<profiles>".len()..];
+        let end = rest.find("</profiles>").unwrap_or(rest.len());
+        let (section, after) = rest.split_at(end);
+        for profile in section.split("<profile>").skip(1) {
+            let profile = profile.split("</profile>").next().unwrap_or_default();
+            let own = without_sections(profile, &["build", "repositories", "pluginRepositories", "distributionManagement", "reporting"]);
+            let Some(id) = own.split_once("<id>").and_then(|(_, r)| r.split_once("</id>")).map(|(id, _)| id.trim().to_owned()).filter(|id| !id.is_empty()) else { continue };
+            let mut folders = Vec::new();
+            for tag in ["source", "sourceDirectory", "testSourceDirectory"] {
+                let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+                for part in profile.split(open.as_str()).skip(1) {
+                    if let Some((folder, _)) = part.split_once(close.as_str()) {
+                        let folder = folder.trim().trim_start_matches("${project.basedir}/").trim_start_matches("${basedir}/").trim_end_matches('/');
+                        if !folder.is_empty() && !folder.contains("${") && !folders.iter().any(|f| f == folder) { folders.push(folder.to_owned()); }
+                    }
+                }
+            }
+            if let Some(known) = out.iter_mut().find(|(i, _)| *i == id) { known.1.extend(folders); } else { out.push((id, folders)); }
+        }
+        rest = after;
+    }
+    out
+}
+
+/// The profile among `sources` that adds a folder holding `file` (`root`'s project), with that folder.
+pub fn profile_for(sources: &[(String, Vec<String>)], root: &Path, file: &Path) -> Option<(String, String)> {
+    sources.iter().find_map(|(id, folders)| folders.iter().find(|f| file.starts_with(root.join(f))).map(|f| (id.clone(), f.clone())))
 }
 
 fn without_sections(text: &str, tags: &[&str]) -> String {
@@ -129,6 +173,22 @@ mod tests {
 </project>"#;
         assert_eq!(profiles_in(pom), ["benchmarks", "release"]);
         assert!(profiles_in("<project/>").is_empty());
+    }
+
+    #[test]
+    fn a_profile_that_adds_a_files_folder_is_found() {
+        let pom = r#"<project><profiles>
+  <profile><id>security</id></profile>
+  <profile><id>benchmarks</id><build><plugins><plugin><artifactId>build-helper-maven-plugin</artifactId>
+    <executions><execution><id>add-jmh-sources</id><goals><goal>add-test-source</goal></goals>
+      <configuration><sources><source>${project.basedir}/src/jmh/java/</source></sources></configuration></execution></executions>
+  </plugin></plugins></build></profile>
+</profiles></project>"#;
+        let sources = profile_sources_in(pom);
+        assert_eq!(sources, [("security".to_owned(), vec![]), ("benchmarks".to_owned(), vec!["src/jmh/java".to_owned()])]);
+        let root = Path::new("/p/service");
+        assert_eq!(profile_for(&sources, root, &root.join("src/jmh/java/x/Bench.java")), Some(("benchmarks".into(), "src/jmh/java".into())));
+        assert_eq!(profile_for(&sources, root, &root.join("src/main/java/x/App.java")), None);
     }
 
     #[test]

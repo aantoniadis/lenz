@@ -1968,6 +1968,38 @@ fn maven_profiles_are_given_to_jdtls_through_a_settings_file_of_lenzs() {
     assert!(f.s.language_server_details().contains("Maven profiles: benchmarks (pom.xml declares benchmarks, release;"));
 }
 
+/// A file outside the build whose folder an inactive Maven profile adds: the status bar and F2 name that profile, and
+/// one action activates it (keeping the active ones).
+#[test]
+fn the_maven_profile_that_adds_a_files_folder_is_offered() {
+    let pom = "<project><profiles><profile><id>security</id></profile><profile><id>benchmarks</id><build><plugins><plugin><executions><execution><configuration><sources><source>${project.basedir}/src/jmh/java</source></sources></configuration></execution></executions></plugin></plugins></build></profile></profiles></project>\n";
+    let files = [("pom.xml", pom), ("src/jmh/java/B.java", "class B {}\n")];
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_JDT", "1"), ("FAKE_LSP_OUTSIDE", "1")], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/jmh/java/B.java");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready) && s.state().outside_build().is_some());
+    f.s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(8) }));
+    assert_eq!(f.s.maven_suggestion(), Some(("benchmarks".to_owned(), "src/jmh/java".to_owned())));
+    assert_eq!(f.s.status_message(), "Outside the build: Maven profile benchmarks adds its folder · F2 to include it");
+    let rows = f.s.language_server_rows();
+    assert_eq!(rows[1], ("Activate Maven Profile “benchmarks” for This File".to_owned(), Some(CommandId::IncludeInBuild)));
+    assert!(f.s.language_server_details().contains("Its folder src/jmh/java is added by the Maven profile benchmarks, which is not active."));
+    // JDT LS's "… does not exist" error says what that row explains: kept in Logs, not repeated.
+    f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Nov 21 src/jmh/java [in proj] does not exist\nJava Model Exception"}}),
+    }));
+    assert!(!f.s.language_server_details().contains("Server error:"));
+    // A lookup that finds nothing says why.
+    f.definition("class B", false);
+    f.asked();
+    assert!(f.notice("found no definition here (this file is outside the build; the Maven profile benchmarks adds it: F2)"), "{:?}", f.s.state().notices());
+    let xml = f.s.maven_project().unwrap().xml;
+    f.s.dispatch(Command::IncludeInBuild);
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Maven profiles for proj: benchmarks.")));
+    assert_eq!(code_core::semantics::maven::active_in(&xml), ["benchmarks"]);
+}
+
 #[test]
 fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session() {
     let files = [("pom.xml", ""), ("src/A.java", "class A {\n    void m() { virt(); }\n}\n")];

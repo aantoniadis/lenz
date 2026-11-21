@@ -150,6 +150,9 @@ impl Session {
             return provider_message(provider);
         }
         // Checked for syntax only: say so while nothing more specific is shown.
+        if let Some((profile, _)) = self.maven_suggestion() {
+            return format!("Outside the build: Maven profile {profile} adds its folder · F2 to include it");
+        }
         if let Some(outside) = state.outside_build() {
             return if outside.no_project { "Not in any project: syntax errors only · F2 for details".into() } else { "Outside the build's source folders: syntax errors only · F2 for details".into() };
         }

@@ -595,6 +595,8 @@ pub enum Command {
     SetServerRuntime(Option<PathBuf>),
     /// Activate these Maven profiles (typed as a list; empty: the project's defaults) for JDT LS's import, then restart it.
     SetMavenProfiles(String),
+    /// Activate the Maven profile that adds the active file's folder (see `Session::maven_suggestion`).
+    IncludeInBuild,
     ExcludeRubyTooling,
     SetRubyToolingExclusions(bool),
     ResetProjectServerSettings,
@@ -909,6 +911,7 @@ pub enum CommandId {
     CancelServerInstall,
     ServerRuntime,
     MavenProfiles,
+    IncludeInBuild,
     RestartServer,
     ExcludeRubyTooling,
     ResetProjectServerSettings,
@@ -1033,7 +1036,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 267] = [
+    pub const ALL: [CommandId; 268] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -1198,6 +1201,7 @@ impl CommandId {
         Self::CancelServerInstall,
         Self::ServerRuntime,
         Self::MavenProfiles,
+        Self::IncludeInBuild,
         Self::RestartServer,
         Self::ExcludeRubyTooling,
         Self::ResetProjectServerSettings,
@@ -1511,6 +1515,7 @@ impl CommandId {
             Self::CancelServerInstall => "Cancel Installation",
             Self::ServerRuntime => "Choose Language Server Runtime…",
             Self::MavenProfiles => "Maven Profiles…",
+            Self::IncludeInBuild => "Activate the Maven Profile That Adds This File",
             Self::RestartServer => "Restart Language Server",
             Self::ExcludeRubyTooling => "Exclude Ruby Tooling Gems for This Project",
             Self::ResetProjectServerSettings => "Reset LSP Settings for This Project",
@@ -3100,7 +3105,9 @@ struct LayoutIntent {
 
 pub struct Session {
     /// pom.xml profiles and Lenz's Maven settings, parsed once per file version (menus ask on every frame).
-    maven_files: semantics::maven::Cache,
+    maven_files: semantics::maven::Cache<Vec<String>>,
+    /// Each pom.xml's profiles and the source folders they add, parsed once per file version.
+    maven_sources: semantics::maven::Cache<Vec<(String, Vec<String>)>>,
     /// Each tab's file and caret position as the status bar last drew them, kept while its text reloads.
     pub(crate) shown_position: std::cell::RefCell<std::collections::HashMap<TabId, (PathBuf, String)>>,
     terminals: terminal_work::Terminals,
@@ -3389,6 +3396,7 @@ impl Session {
         Self {
             shown_position: Default::default(),
             maven_files: Default::default(),
+            maven_sources: Default::default(),
             terminals: terminal_work::Terminals::default(),
             text_input_enabled,
             vim_group_edit: false,
@@ -3697,7 +3705,7 @@ impl Session {
             CommandId::Cut | CommandId::Paste | CommandId::Delete | CommandId::SelectAll | CommandId::ExtendSelection | CommandId::ShrinkSelection | CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections | CommandId::IndentSelection | CommandId::OutdentSelection | CommandId::ToggleComment | CommandId::MoveLinesUp | CommandId::MoveLinesDown | CommandId::DuplicateLinesUp | CommandId::DuplicateLinesDown | CommandId::DeleteLine | CommandId::Completion | CommandId::FormatDocument | CommandId::OrganizeImports | CommandId::QuickFix | CommandId::ReplaceMatch | CommandId::ReplaceAll) { return Some("Use CSV cell editing or switch to Source"); }
         if self.csv_pending() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
         if (self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || self.install_running.is_some()) && matches!(id,
-            CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::MavenProfiles | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
+            CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::MavenProfiles | CommandId::IncludeInBuild | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
             | CommandId::TrustProjectTools | CommandId::UntrustProjectTools | CommandId::FolderTrust
             | CommandId::RestartServer | CommandId::RebuildIndex | CommandId::ExcludeRubyTooling | CommandId::ResetProjectServerSettings) {
             return Some(if self.install_running.is_some() { "Waiting for the current installation to finish or stop" } else { "Waiting for language server settings to finish saving" });
@@ -3957,6 +3965,7 @@ impl Session {
                 Some((p, root)) if id == CommandId::ResetProjectServerSettings && !self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) => Some("This project already inherits global language server settings"),
                 _ => None,
             },
+            CommandId::IncludeInBuild => self.maven_suggestion().is_none().then_some("This file's folder is not added by an inactive Maven profile"),
             CommandId::MavenProfiles => match self.maven_project() {
                 Err(why) => Some(why),
                 Ok(project) if project.available.is_empty() => Some("This project's pom.xml declares no profiles"),
@@ -4099,6 +4108,10 @@ impl Session {
             CommandId::RebuildIndex,
         ] {
             rows.push((crate::chrome::toggle_text(id.label(), self.on(id)), Some(id)));
+        }
+        // The file is outside the build and a Maven profile adds its folder: the fix, right below Server Details.
+        if let Some((profile, _)) = self.maven_suggestion() {
+            rows.insert(1.min(rows.len()), (format!("Activate Maven Profile “{profile}” for This File"), Some(CommandId::IncludeInBuild)));
         }
         // Only in a Maven project JDT LS imports: elsewhere it would be one more disabled row.
         if self.maven_project().is_ok_and(|p| !p.available.is_empty()) {
@@ -4289,7 +4302,10 @@ impl Session {
         };
         rows.push(summary);
         // The file itself is outside the build: what the server said and how to bring it in.
-        if let Some(outside) = self.state.outside_build() {
+        let suggestion = self.maven_suggestion();
+        if let Some(outside) = self.state.outside_build() && let Some((profile, folder)) = &suggestion {
+            rows.push(format!("{}.\nIts folder {folder} is added by the Maven profile {profile}, which is not active. Choose Activate Maven Profile “{profile}” for This File: Eclipse JDT LS restarts and imports the project with it.", outside.message.trim_end_matches('.')));
+        } else if let Some(outside) = self.state.outside_build() {
             rows.push(format!("{}.\n{}", outside.message.trim_end_matches('.'), if outside.no_project {
                 "Open the folder of the project that contains it, or add it to a project's build, for navigation, completion and full checks."
             } else {
@@ -4298,7 +4314,9 @@ impl Session {
         }
         // Right below its status: the reason it may not be working. Its first line (a stack trace's message); the
         // whole text is in Logs.
-        if let Some(error) = view.as_ref().and_then(|v| v.error.as_ref()) {
+        // JDT LS's "… [in project] does not exist" for a file outside the build says what the row above explains.
+        let explained = |first: &str| self.state.outside_build().is_some() && first.ends_with("does not exist");
+        if let Some(error) = view.as_ref().and_then(|v| v.error.as_ref()).filter(|e| !explained(e.lines().next().unwrap_or_default())) {
             let first = error.lines().next().unwrap_or_default();
             let more = if error.lines().nth(1).is_some() { " Its full text is in Logs." } else { "" };
             rows.push(format!("Server error: {first}\nThe server may keep running with reduced results.{more}"));
@@ -6339,6 +6357,13 @@ impl Session {
             }
             Command::ExcludeRubyTooling => self.save_project_provider(Some(true)),
             Command::SetMavenProfiles(input) => self.save_maven_profiles(&input),
+            Command::IncludeInBuild => match (self.maven_suggestion(), self.maven_project()) {
+                (Some((profile, _)), Ok(project)) => {
+                    let list = project.active.iter().cloned().chain(std::iter::once(profile)).collect::<Vec<_>>().join(", ");
+                    self.save_maven_profiles(&list)
+                }
+                _ => Effect::default(),
+            },
             Command::SetRubyToolingExclusions(on) => self.save_project_provider(Some(on)),
             Command::ResetProjectServerSettings => self.save_project_provider(None),
             Command::SetPersistentIndex(on) => {
@@ -6863,6 +6888,16 @@ impl Session {
             None => Vec::new(),
         };
         Ok(MavenProject { available: self.maven_files.get(&pom, semantics::maven::pom_profiles), active, root, xml })
+    }
+
+    /// The active file is outside the build, and an inactive Maven profile of its project adds its folder: that profile
+    /// and the folder as the pom.xml names it.
+    pub fn maven_suggestion(&self) -> Option<(String, String)> {
+        if self.state.outside_build().is_none_or(|o| o.no_project) { return None; }
+        let project = self.maven_project().ok()?;
+        let file = self.state.current_source()?.source();
+        let sources = self.maven_sources.get(&project.root.join("pom.xml"), semantics::maven::pom_profile_sources);
+        semantics::maven::profile_for(&sources, &project.root, file).filter(|(p, _)| !project.active.contains(p))
     }
 
     /// What Maven Profiles… asks for: the active profiles as a list, and the profiles the pom.xml declares.
@@ -8459,7 +8494,13 @@ impl Session {
                     Ask::TypeDefinition => "no type definition here",
                     _ => "no definition here",
                 };
-                // Its known limits are in Server Details (F2), not repeated in every such notice.
+                // Its known limits are in Server Details (F2), not repeated in every such notice. A file outside the build
+                // is the reason itself: the server checks only its syntax.
+                let note = match self.maven_suggestion() {
+                    Some((profile, _)) => format!(" (this file is outside the build; the Maven profile {profile} adds it: F2)"),
+                    None if self.state.outside_build().is_some() => " (this file is outside the build: only its syntax is checked)".into(),
+                    None => note.to_owned(),
+                };
                 self.state.messages.push(format!("{label}: {provider} found {what}{note}"));
             }
             return Effect { repaint: true, copy: None, ..Effect::default() };

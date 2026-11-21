@@ -384,6 +384,7 @@ impl Session {
             CommandId::StartServerInstall => Command::StartServerInstall,
             CommandId::CancelServerInstall => Command::CancelServerInstall,
             CommandId::RestartServer => Command::RestartServer,
+            CommandId::IncludeInBuild => Command::IncludeInBuild,
             CommandId::ExcludeRubyTooling => Command::SetRubyToolingExclusions(!state.setting(id).unwrap_or(false)),
             CommandId::PersistentIndex => Command::SetPersistentIndex(!state.setting(id).unwrap_or(false)),
             CommandId::IndentTabs => Command::SetProjectIndent(Some(crate::preferences::Indent::Tabs)),
@@ -616,7 +617,7 @@ impl CommandId {
             Self::ExtendSelection | Self::ShrinkSelection | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections => return G::Selections,
             Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown | Self::DuplicateLinesUp | Self::DuplicateLinesDown | Self::DeleteLine => return G::Lines,
             Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave => return G::EditingSettings,
-            Self::WorkspaceRoot | Self::ServerRuntime | Self::MavenProfiles | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex | Self::TrustProjectTools | Self::UntrustProjectTools | Self::FolderTrust => return G::ServerSetup,
+            Self::WorkspaceRoot | Self::ServerRuntime | Self::MavenProfiles | Self::IncludeInBuild | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex | Self::TrustProjectTools | Self::UntrustProjectTools | Self::FolderTrust => return G::ServerSetup,
             Self::ConfigureSqlMetadata | Self::ConnectSqlMetadata | Self::RefreshSqlMetadata | Self::DisconnectSqlMetadata => return G::Metadata,
             Self::SqlDialect | Self::SqlDialectPostgreSql | Self::SqlDialectDuckDb | Self::SqlDialectFollowProject | Self::ProjectSqlDialectPostgreSql | Self::ProjectSqlDialectDuckDb | Self::ProjectSqlDialectUnset => return G::Dialect,
             Self::Keymap | Self::KeymapIntelliJ | Self::KeymapVsCode | Self::ResetKeymap => return G::Keybindings,
@@ -654,7 +655,7 @@ impl CommandId {
             | Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown
             | Self::DuplicateLinesUp | Self::DuplicateLinesDown | Self::DeleteLine
             | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion | Self::ParameterInfo | Self::QuickFix | Self::FormatDocument | Self::OrganizeImports => G::Selection,
-            Self::InstallServer | Self::StartServerInstall | Self::CancelServerInstall | Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime | Self::MavenProfiles
+            Self::InstallServer | Self::StartServerInstall | Self::CancelServerInstall | Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime | Self::MavenProfiles | Self::IncludeInBuild
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer | Self::TrustProjectTools | Self::UntrustProjectTools | Self::FolderTrust => G::LanguageServers,
             Self::InspectChange | Self::ShowChangeDiff | Self::RevertChange | Self::CloseChange => G::Git,
