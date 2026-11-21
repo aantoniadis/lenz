@@ -416,7 +416,8 @@ pub struct ReaderView {
     /// The toolbar button under the pointer.
     pub nav_hover: Option<CommandId>,
     modal_hover: Option<Bounds<Pixels>>,
-    preview_hover: Option<u8>,
+    /// The pane and segment (0 source, 1 preview or table) of the file switch under the pointer.
+    preview_hover: Option<(u8, usize)>,
     app_menu_hover: bool,
     commands_hover: bool,
     /// The installed Nerd Font for file icons (looked up once; `Some(None)`: none, shapes are drawn).
@@ -3971,6 +3972,14 @@ impl ReaderView {
         }
         if self.terminal_click(ev, window, cx) { return; }
         self.blur_terminal(cx);
+        // The Preview/Table toggle floats over the file: it takes the click before the table or the text under it.
+        if self.modal.is_none() && let Some((pane, b, action)) = self.panes.iter().find_map(|g| self.preview_button(*g).filter(|(b, _)| b.contains(&ev.position)).map(|(b, action)| (g.pane, b, action))) {
+            self.tree_focus = false;
+            self.dispatch(Command::FocusPane(pane), cx);
+            // The shown mode's segment stays as it is.
+            if switch_segments(b)[usize::from(!switch_rendered(&action))].contains(&ev.position) { self.run(action.id, window, cx); }
+            return cx.notify();
+        }
         if self.csv_field().is_some() { return; }
         if self.csv_click(ev, cx) { return; }
         // A find box keeps a click: a toggle flips its option, anywhere else gives it the keys.
@@ -4128,11 +4137,6 @@ impl ReaderView {
         }
         if y < toolbar_h() || (y < toolbar_h() + line_h() && x < self.sidebar_w) {
             return;
-        }
-        if let Some((pane, id)) = self.panes.iter().find_map(|g| self.preview_button(*g).filter(|(b, _)| b.contains(&ev.position)).map(|(_, action)| (g.pane, action.id))) {
-            self.tree_focus = false;
-            self.dispatch(Command::FocusPane(pane), cx);
-            return self.run(id, window, cx);
         }
         // A pane's tab bar: a tab is shown (its pane focused) and can be dragged; elsewhere the click focuses the pane.
         if let Some(g) = self.panes.iter().find(|g| (g.bar.2..g.bar.2 + line_h()).contains(&y) && (g.bar.0..g.bar.1).contains(&x)).copied() {
@@ -4487,7 +4491,10 @@ impl ReaderView {
                     else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
                 } else { None }
             });
-        let preview_hover = self.modal.is_none().then(|| self.panes.iter().find(|g| self.preview_button(**g).is_some_and(|(b, _)| b.contains(&ev.position))).map(|g| g.pane)).flatten();
+        let preview_hover = self.modal.is_none().then(|| self.panes.iter().find_map(|g| {
+            let (b, _) = self.preview_button(*g)?;
+            switch_segments(b).iter().position(|s| s.contains(&ev.position)).map(|i| (g.pane, i))
+        })).flatten();
         if preview_hover != self.preview_hover {
             self.preview_hover = preview_hover;
             cx.notify();
@@ -4781,13 +4788,22 @@ impl ReaderView {
         }).collect()
     }
 
-    /// Reserve the right edge of the file header; narrow panes keep the keyboard/menu action.
+    /// The file's source/preview (or source/table) switch, two icons floating at the top-right of its text (below
+    /// the find box while that is open). Panes too small for it keep the keyboard and menu action.
     pub fn preview_button(&self, pane: PaneGeom) -> Option<(Bounds<Pixels>, code_core::session::Action)> {
         let control = self.session.csv_control(pane.pane).or_else(|| self.session.preview_control(pane.pane))?;
-        let width = 9.0 * self.char_w;
-        let x = pane.bar.1 - width - 4.0;
-        if x < pane.bar.0 + 8.0 * self.char_w || pane.bar.2 + line_h() > self.body_bottom() { return None; }
-        Some((Bounds { origin: gpui::point(px(x), px(pane.bar.2)), size: gpui::size(px(width), px(line_h())) }, control))
+        let (width, height) = (2.0 * SWITCH_W + 1.0, line_h() + 4.0);
+        let text = pane.text;
+        let top = self.find_box(&pane).map_or(f32::from(text.origin.y) + 4.0, |b| f32::from(b.bounds.bottom()) + 4.0);
+        let x = f32::from(text.right()) - 8.0 - width;
+        if x < f32::from(text.origin.x) + 8.0 * self.char_w || top + height > f32::from(text.bottom()) { return None; }
+        Some((Bounds { origin: gpui::point(px(x), px(top)), size: gpui::size(px(width), px(height)) }, control))
+    }
+
+    /// The switch's segment that does something (the mode not shown), for a click.
+    pub fn preview_target(&self, pane: PaneGeom) -> Option<Bounds<Pixels>> {
+        let (b, control) = self.preview_button(pane)?;
+        Some(switch_segments(b)[usize::from(!switch_rendered(&control))])
     }
 
     /// The explorer's title-row buttons, in window coordinates (as [`Self::nav_buttons`]): select the opened file.
@@ -6121,7 +6137,7 @@ impl Render for ReaderView {
                 x += w;
                 ((title, t.retained(), Some(t.id()) == shown, x - w, x, dirty, status, recovered), t.id())
             }).collect();
-            let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
+            let right = g.bar.1;
             let pane = usize::from(g.pane);
             let maximum = (x - right).max(0.0);
             self.tab_scroll_max[pane] = maximum;
@@ -6616,7 +6632,7 @@ impl Render for ReaderView {
                             if by > 0.0 {
                                 lenz_gpui::fill(window, x0 + bx0, y, bx1 - bx0, tabs_h, palette.header_bg);
                             }
-                            let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
+                            let tab_end = bx1;
                             let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
                                 for (title, retained, shown, tx0, tx1, dirty, status, recovered) in &f.tabs {
@@ -6651,13 +6667,6 @@ impl Render for ReaderView {
                                     lenz_gpui::fill(window, x0 + dx - 1.0, y + 2.0, 2.0, tabs_h - 4.0, palette.accent);
                                 }
                             });
-                            if let Some((b, action)) = &f.preview_button {
-                                let x = x0 + f32::from(b.left());
-                                let width = f32::from(b.size.width);
-                                lenz_gpui::fill(window, x, y + 2.0, width, tabs_h - 4.0, if preview_hover == Some(f.geom.pane) { palette.selected_bg } else { palette.fold_bg });
-                                let text_w = action.label.len() as f32 * char_w;
-                                lenz_gpui::text(window, cx, m, x + (width - text_w) / 2.0, y, action.label, if action.disabled.is_none() { palette.fg } else { palette.dim });
-                            }
                         }
                         // The status bar along the bottom, over the whole width.
                         if status_h > 0.0 {
@@ -6863,6 +6872,10 @@ impl Render for ReaderView {
                                 }
                                 if let Some(b) = &f.find {
                                     b.paint(window, cx, m, &palette, gpui::point(px(x0), px(y0)), char_w);
+                                }
+                                if let Some((b, action)) = &f.preview_button {
+                                    let hover = preview_hover.filter(|(pane, _)| *pane == f.geom.pane).map(|(_, i)| i);
+                                    paint_switch(window, cx, m, &palette, gpui::point(px(x0), px(y0)), *b, action, hover, char_w);
                                 }
                             });
                         }
@@ -7369,6 +7382,60 @@ fn paint_symbol(window: &mut Window, id: CommandId, cx: f32, cy: f32, shown: boo
             }
         }
     }
+}
+
+/// One segment's width in the file's source/preview switch.
+const SWITCH_W: f32 = 26.0;
+
+/// The switch's source and preview (or table) segments, either side of a 1px divider.
+fn switch_segments(b: Bounds<Pixels>) -> [Bounds<Pixels>; 2] {
+    let (x, y, h) = (f32::from(b.left()), b.top(), b.size.height);
+    [Bounds { origin: gpui::point(px(x), y), size: gpui::size(px(SWITCH_W), h) }, Bounds { origin: gpui::point(px(x + SWITCH_W + 1.0), y), size: gpui::size(px(SWITCH_W), h) }]
+}
+
+/// Whether the rendering (the Markdown preview or the CSV table) is shown: the switch's action goes back to the source.
+fn switch_rendered(action: &code_core::session::Action) -> bool {
+    action.label == "Source"
+}
+
+/// The file's switch, framed like the find box: the shown mode's segment filled, the other's icon dimmer until the
+/// pointer is on it, and the hovered segment's name in a small label under it.
+#[allow(clippy::too_many_arguments)]
+fn paint_switch(window: &mut Window, cx: &mut App, m: lenz_gpui::Metrics, palette: &lenz_content::theme::Palette, offset: gpui::Point<Pixels>, b: Bounds<Pixels>, action: &code_core::session::Action, hover: Option<usize>, char_w: f32) {
+    let (ox, oy) = (f32::from(offset.x), f32::from(offset.y));
+    let (x, y, w, h) = (ox + f32::from(b.left()), oy + f32::from(b.top()), f32::from(b.size.width), f32::from(b.size.height));
+    let (rendered, table, enabled) = (switch_rendered(action), action.id == CommandId::CsvTable, action.disabled.is_none());
+    let shown = usize::from(rendered);
+    lenz_gpui::fill(window, x, y, w, h, if hover.is_some() && enabled { palette.accent } else { palette.border });
+    lenz_gpui::fill(window, x + 1.0, y + 1.0, w - 2.0, h - 2.0, palette.header_bg);
+    for (i, s) in switch_segments(b).into_iter().enumerate() {
+        let (sx, sw) = (ox + f32::from(s.left()), f32::from(s.size.width));
+        // Inside the frame and off the divider: x+1..x+SWITCH_W, then x+SWITCH_W+1..x+w-1.
+        if i == shown { lenz_gpui::fill(window, x + 1.0 + i as f32 * SWITCH_W, y + 1.0, SWITCH_W - 1.0, h - 2.0, palette.selected_bg); }
+        let color = if !enabled { palette.dim } else if i == shown || hover == Some(i) { palette.fg } else { palette.dim };
+        paint_switch_icon(window, i, table, sx + sw / 2.0, y + h / 2.0, color);
+    }
+    lenz_gpui::fill(window, x + SWITCH_W, y + 1.0, 1.0, h - 2.0, palette.border);
+    if let Some(i) = hover {
+        let name = match (i, table) { (0, _) => "Source", (_, true) => "Table", (_, false) => "Preview" };
+        let label = match (enabled, action.disabled) { (false, Some(why)) => format!("{name}: {why}"), _ if i == shown => format!("{name} (shown)"), _ => format!("Show {}", name.to_lowercase()) };
+        let lw = (label.chars().count() as f32 + 2.0) * char_w;
+        let (lx, ly) = (x + w - lw, y + h + 4.0);
+        lenz_gpui::popup::surface(window, lx, ly, lw, m.line_h + 4.0, palette);
+        lenz_gpui::text(window, cx, m, lx + char_w, ly + 2.0, &label, palette.fg);
+    }
+}
+
+/// The switch's icons, drawn on whole pixels about `(cx, cy)`: source as lines of text, the preview as a page with a
+/// heading, the table as a grid.
+fn paint_switch_icon(window: &mut Window, segment: usize, table: bool, cx: f32, cy: f32, color: u32) {
+    let fill = |window: &mut Window, x: f32, y: f32, w: f32, h: f32| lenz_gpui::fill(window, (cx + x).round(), (cy + y).round(), w, h, color);
+    let rects: &[(f32, f32, f32, f32)] = match (segment, table) {
+        (0, _) => &[(-6.0, -5.0, 9.0, 1.0), (-3.0, -2.0, 9.0, 1.0), (-3.0, 1.0, 6.0, 1.0), (-6.0, 4.0, 5.0, 1.0)],
+        (_, false) => &[(-5.0, -6.0, 10.0, 1.0), (-5.0, 6.0, 10.0, 1.0), (-5.0, -6.0, 1.0, 13.0), (4.0, -6.0, 1.0, 13.0), (-3.0, -4.0, 6.0, 2.0), (-3.0, 0.0, 6.0, 1.0), (-3.0, 2.0, 6.0, 1.0), (-3.0, 4.0, 4.0, 1.0)],
+        (_, true) => &[(-6.0, -5.0, 13.0, 1.0), (-6.0, 5.0, 13.0, 1.0), (-6.0, -5.0, 1.0, 11.0), (6.0, -5.0, 1.0, 11.0), (-6.0, -2.0, 13.0, 2.0), (-6.0, 2.0, 13.0, 1.0), (-2.0, -5.0, 1.0, 11.0), (2.0, -5.0, 1.0, 11.0)],
+    };
+    for &(x, y, w, h) in rects { fill(window, x, y, w, h); }
 }
 
 /// One visible line of the project tree.

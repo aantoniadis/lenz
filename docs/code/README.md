@@ -266,8 +266,9 @@ formatter; mixed-content whitespace stays under the author's control.
 
 ### CSV tables
 
-CSV opens as source. Use the pane header's **Table / Source** control or **CSV: Table / Source** in Find Action
-to show a table. Each pane keeps its own filter, sort and viewport. The first record supplies column headings;
+CSV opens as source. Use the switch at the file's top-right (source | table; **Table / Source** in the
+terminal) or **CSV: Table / Source** in Find Action to show a table. Each pane keeps its own filter, sort and
+viewport. The first record supplies column headings;
 **CSV: Toggle Header Row** includes it as data instead.
 
 Click a cell and press Enter (or double-click in the GUI) to edit it. Enter commits one undoable draft edit;
@@ -800,9 +801,11 @@ search that is still running (**Stop Search**, keeping what it found so far), th
 is hidden the status bar shows **Results (N)**; a click there shows it again. A new search or usages list shows
 itself, and **Close Results** discards the results.
 
-Markdown files open as their source. **Preview / Source** sits at the right edge of each file pane's header
-and controls that pane's document, including in split views. Ctrl+Shift+V and the command menu remain available
-when the pane is too narrow for the button. Switching preserves the reading line, and a file switched to its
+Markdown files open as their source. A two-icon switch floats at the top-right of each file pane, as in
+IntelliJ: source on the left, preview on the right, the shown one highlighted and each named on hover (in the
+terminal, a **Preview / Source** button in the same corner). It controls that pane's document, including in split
+views, and sits under the find box while that is open. Ctrl+Shift+V and the command menu remain available when
+the pane is too small for it. Switching preserves the reading line, and a file switched to its
 preview opens that way again. The preview shows local raster images only: inside the
 browsing root, or beside the Markdown file when it is outside the root, resolved through symlinks, at most 64 per
 document and 64 MiB each. Remote, missing and outside images say why in place. Folded callouts are shown open. A

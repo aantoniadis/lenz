@@ -47,11 +47,16 @@ fn gui_csv_table_opt_in_cells_edit_filter_sort_and_column_commands(cx: &mut Test
     drop(v); settle(cx, &f, csv_ready); let mut v = visual(cx, &f);
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().csv(r.session.state().active().unwrap().id()).unwrap().column_count()), 1);
     draw(&mut v);
-    let source_button = f.view.read_with(&v, |r, _| {
-        let (bounds, action) = r.preview_button(r.panes[0]).unwrap();
+    let (source_button, table_button) = f.view.read_with(&v, |r, _| {
+        let (switch, action) = r.preview_button(r.panes[0]).unwrap();
         assert_eq!((action.id, action.label), (CommandId::CsvTable, "Source"));
-        bounds.center()
+        let source = r.preview_target(r.panes[0]).unwrap();
+        assert!(switch.contains(&source.center()) && source.left() == switch.left(), "source is the switch's left segment");
+        (source.center(), point(switch.right() - px(4.0), switch.center().y))
     });
+    // The shown mode's segment changes nothing.
+    v.simulate_click(table_button, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.session.state().csv(r.session.state().active().unwrap().id()).is_some()));
     v.simulate_click(source_button, Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| r.session.state().csv(r.session.state().active().unwrap().id()).is_none()));
     assert_eq!(std::fs::read(f.dir.path().join("data.csv")).unwrap(), original);

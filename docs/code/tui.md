@@ -375,7 +375,7 @@ terminal use the same parser and editing commands.
 
 ## CSV tables
 
-CSV's header **Table / Source** button and F10's **CSV: Table / Source** switch modes. Arrows move cells;
+The **Table / Source** button at the file's top-right and F10's **CSV: Table / Source** switch modes. Arrows move cells;
 Enter edits, Ctrl+A clears the pending value, Enter commits and Escape cancels. Pending fields must be finished
 before Save or closing. `/` filters the selected column by a literal substring; `s` cycles ascending text,
 descending text and source order. Filtering and sorting affect the view only. Column move/drop and header-row

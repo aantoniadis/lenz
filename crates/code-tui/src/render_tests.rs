@@ -1294,7 +1294,9 @@ fn markdown_lists_show_each_marker_once_and_keep_tight_items_together() {
     let buffer = draw(&mut app, 50, 20);
     // Left of the scrollbar column.
     let right = app.layout.panes[0].strip.x;
-    let rows: Vec<String> = (0..20).map(|y| (0..right).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()).collect();
+    // The Source toggle floating over the first line is not the list's text.
+    let toggle = app.layout.controls.iter().find(|(id, _)| *id == CommandId::MarkdownSource).map(|(_, r)| *r).expect("the Source toggle");
+    let rows: Vec<String> = (0..20).map(|y| (0..right).map(|x| if toggle.contains(ratatui::layout::Position { x, y }) { " " } else { buffer[(x, y)].symbol() }).collect::<String>().trim_end().to_owned()).collect();
     let shown = |s: &str| rows.iter().position(|r| r.ends_with(s)).unwrap_or_else(|| panic!("{s:?} not in {rows:#?}"));
     for (row, marker) in [("a", "•"), ("one", "1."), ("task", "☐"), ("done", "☑")] {
         let r = &rows[shown(row)];

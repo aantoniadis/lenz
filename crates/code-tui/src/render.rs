@@ -653,7 +653,8 @@ impl App {
                 let area = text_area(self.session.state(), pane as u8, rect);
                 self.session.dispatch(Command::Csv(code_core::csv::Command::Size { rows: area.height.saturating_sub(2) as usize, columns: usize::from(area.width / 18).max(1) }));
             }
-            let pane = draw_pane(frame, self, pane as u8, rect, p);
+            let mut pane = draw_pane(frame, self, pane as u8, rect, p);
+            draw_file_toggle(frame, self, &mut pane, p);
             draw_scrollbar(frame.buffer_mut(), self, &pane, p);
             geometry.panes.push(pane);
         }
@@ -2001,6 +2002,19 @@ fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
 }
 
 /// The scrollbar column beside a pane's text: empty when the pane has none.
+/// The file's Preview/Table toggle, over the top-right of its text (one cell in from the edge), drawn after the
+/// pane so it stays on top. Panes too narrow for it keep the F10 and key action.
+fn draw_file_toggle(frame: &mut ratatui::Frame, app: &App, geometry: &mut PaneGeometry, p: &Palette) {
+    let text = geometry.text;
+    let Some(control) = app.session.csv_control(geometry.pane).or_else(|| app.session.preview_control(geometry.pane)) else { return };
+    if text.width < 17 || text.height < 2 { return; }
+    let button = Rect::new(text.right() - 10, text.y, 9, 1);
+    let st = style(if control.disabled.is_none() { p.fg } else { p.dim }, p.fold_bg);
+    fill(frame.buffer_mut(), button, st);
+    line(frame.buffer_mut(), button, &format!(" {} ", control.label), st);
+    geometry.controls.push((control.id, button));
+}
+
 fn strip_area(text: Rect, area: Rect) -> Rect {
     Rect::new(text.right(), text.y, area.right().saturating_sub(text.right()).min(1), text.height)
 }
@@ -2095,15 +2109,7 @@ fn draw_pane(
     }
     let active = state.shown(pane).map(Tab::id);
     fill(frame.buffer_mut(), row(area, 0), style(p.fg, p.header_bg));
-    let mut tab_end = area.right();
-    if let Some(control) = app.session.csv_control(pane).or_else(|| app.session.preview_control(pane)).filter(|_| area.width >= 17) {
-        let button = Rect::new(area.right() - 9, area.y, 9, 1);
-        let st = style(if control.disabled.is_none() { p.fg } else { p.dim }, p.fold_bg);
-        fill(frame.buffer_mut(), button, st);
-        line(frame.buffer_mut(), button, &format!(" {} ", control.label), st);
-        geometry.controls.push((control.id, button));
-        tab_end = button.x;
-    }
+    let tab_end = area.right();
     let mut x = area.x;
     let tab_width = tab_end.saturating_sub(x);
     geometry.tab_bar = Rect::new(x, area.y, tab_width, 1);

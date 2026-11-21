@@ -3575,7 +3575,7 @@ fn a_folder_given_at_launch_opens_as_the_project(cx: &mut TestAppContext) {
 }
 
 fn click_preview(v: &mut VisualTestContext, f: &Fixture, pane: u8) -> &'static str {
-    let (button, control) = f.view.read_with(v, |r, _| r.preview_button(*r.panes.iter().find(|g| g.pane == pane).unwrap()).unwrap());
+    let (button, control) = f.view.read_with(v, |r, _| { let g = *r.panes.iter().find(|g| g.pane == pane).unwrap(); (r.preview_target(g).unwrap(), r.preview_button(g).unwrap().1) });
     v.simulate_click(button.center(), Modifiers::default());
     control.label
 }
