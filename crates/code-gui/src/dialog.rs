@@ -43,6 +43,7 @@ impl ReaderView {
             Modal::GoTo { input, error } => (Form::GoTo, input.as_str(), false, None, error.as_deref()),
             Modal::Root { path } => (Form::Workspace, path.as_str(), false, None, None),
             Modal::SqlMetadata { path } => (Form::SqlMetadata, path.as_str(), false, None, None),
+            Modal::MavenProfiles { path } => (Form::MavenProfiles, path.as_str(), false, None, None),
             _ => return None,
         };
         let text = self.session.form_text(form);

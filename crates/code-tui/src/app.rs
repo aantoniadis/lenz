@@ -70,6 +70,8 @@ pub(crate) enum Prompt {
     Compare(PathBuf),
     WorkspaceRoot,
     SqlMetadata,
+    /// Maven Profiles…: the active profiles, typed as a list.
+    MavenProfiles,
     ServerRuntime,
     RecentRoots,
     Navigation,
@@ -988,6 +990,7 @@ impl App {
             }
             InterfaceAction::ConfigureSqlMetadata => Prompt::SqlMetadata,
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
+            InterfaceAction::MavenProfiles => Prompt::MavenProfiles,
             InterfaceAction::LanguageServer => Prompt::LanguageServer,
             InterfaceAction::EditingPreferences => Prompt::Details { title: "Editing preferences", body: self.session.editing_preferences_details(), logo: false, kind: Details::Text },
             InterfaceAction::SqlDialect => Prompt::Details { title: "SQL dialect", body: self.session.sql_dialect_details(), logo: false, kind: Details::Sql },
@@ -1057,6 +1060,7 @@ impl App {
                     .unwrap_or_default();
             }
             Prompt::SqlMetadata => input = self.session.sql_metadata_source().into(),
+            Prompt::MavenProfiles => input = self.session.maven_project().map(|p| p.active.join(", ")).unwrap_or_default(),
             Prompt::WorkspaceRoot => {
                 input = self
                     .session
@@ -1465,6 +1469,7 @@ impl App {
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::Compare(_) => code_core::external::COMPARISON_PROMPT,
                 Prompt::SqlMetadata => self.session.sql_metadata_prompt(),
+                Prompt::MavenProfiles => return self.session.maven_profiles_prompt(),
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
                 Prompt::ServerRuntime => {
                     "Language server runtime · type a path or choose · Enter restarts the server with it"
@@ -2304,6 +2309,10 @@ impl App {
             Prompt::SqlMetadata => {
                 self.close_modal();
                 self.dispatch(Command::ConfigureSqlMetadata(input));
+            }
+            Prompt::MavenProfiles => {
+                self.close_modal();
+                self.dispatch(Command::SetMavenProfiles(input));
             }
             Prompt::WorkspaceRoot => {
                 let path = (!input.is_empty()).then(|| self.resolve_path(&input));

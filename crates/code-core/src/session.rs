@@ -593,6 +593,8 @@ pub enum Command {
     OpenServerRuntime,
     CloseServerRuntime,
     SetServerRuntime(Option<PathBuf>),
+    /// Activate these Maven profiles (typed as a list; empty: the project's defaults) for JDT LS's import, then restart it.
+    SetMavenProfiles(String),
     ExcludeRubyTooling,
     SetRubyToolingExclusions(bool),
     ResetProjectServerSettings,
@@ -906,6 +908,7 @@ pub enum CommandId {
     StartServerInstall,
     CancelServerInstall,
     ServerRuntime,
+    MavenProfiles,
     RestartServer,
     ExcludeRubyTooling,
     ResetProjectServerSettings,
@@ -1030,7 +1033,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 266] = [
+    pub const ALL: [CommandId; 267] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -1194,6 +1197,7 @@ impl CommandId {
         Self::StartServerInstall,
         Self::CancelServerInstall,
         Self::ServerRuntime,
+        Self::MavenProfiles,
         Self::RestartServer,
         Self::ExcludeRubyTooling,
         Self::ResetProjectServerSettings,
@@ -1506,6 +1510,7 @@ impl CommandId {
             Self::StartServerInstall => "Start Installation",
             Self::CancelServerInstall => "Cancel Installation",
             Self::ServerRuntime => "Choose Language Server Runtime…",
+            Self::MavenProfiles => "Maven Profiles…",
             Self::RestartServer => "Restart Language Server",
             Self::ExcludeRubyTooling => "Exclude Ruby Tooling Gems for This Project",
             Self::ResetProjectServerSettings => "Reset LSP Settings for This Project",
@@ -1653,6 +1658,8 @@ pub enum Completion {
     ServerRuntimeSaved { request: u64, kind: semantics::runtime::Kind, result: Result<Option<PathBuf>, String> },
     ProviderSettingsSaved { ok: bool },
     ProjectProviderSaved { provider: usize, root: PathBuf, reset: bool, result: Result<(), String> },
+    /// Maven profiles saved for JDT LS's import of `root` (or why not).
+    MavenProfilesSaved { root: PathBuf, profiles: Vec<String>, result: Result<(), String> },
     /// The project's saved places read from `from` (or why not), for saving to `file` (a different file when `from`
     /// is its name before names were canonical).
     PlacesRead { generation: u64, file: PathBuf, from: PathBuf, result: Result<crate::places::Places, crate::places::ReadError> },
@@ -1836,6 +1843,7 @@ impl Input {
                 Completion::ProjectFormatted { .. } => "project formatted",
                 Completion::Sql(_) | Completion::SqlMetadata { .. } => "SQL assistance",
                 Completion::ServerRuntimeSaved { .. } => "Server runtime saved",
+                Completion::MavenProfilesSaved { .. } => "Maven profiles saved",
                 Completion::ProviderSettingsSaved { .. } => "provider settings saved",
                 Completion::ProjectProviderSaved { .. } => "project provider settings saved",
                 Completion::Watch { .. } => "watch",
@@ -1857,6 +1865,16 @@ impl Input {
             },
         }
     }
+}
+
+/// A Maven project JDT LS imports, for Maven Profiles…: its root, the profiles its pom.xml declares, those Lenz
+/// activates, and Lenz's settings file for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MavenProject {
+    pub root: PathBuf,
+    pub available: Vec<String>,
+    pub active: Vec<String>,
+    pub xml: PathBuf,
 }
 
 impl From<Command> for Input {
@@ -3081,6 +3099,8 @@ struct LayoutIntent {
 }
 
 pub struct Session {
+    /// pom.xml profiles and Lenz's Maven settings, parsed once per file version (menus ask on every frame).
+    maven_files: semantics::maven::Cache,
     /// Each tab's file and caret position as the status bar last drew them, kept while its text reloads.
     pub(crate) shown_position: std::cell::RefCell<std::collections::HashMap<TabId, (PathBuf, String)>>,
     terminals: terminal_work::Terminals,
@@ -3368,6 +3388,7 @@ impl Session {
         let recovery = crate::recovery::Recovery::open(recovery_dir.clone());
         Self {
             shown_position: Default::default(),
+            maven_files: Default::default(),
             terminals: terminal_work::Terminals::default(),
             text_input_enabled,
             vim_group_edit: false,
@@ -3676,7 +3697,7 @@ impl Session {
             CommandId::Cut | CommandId::Paste | CommandId::Delete | CommandId::SelectAll | CommandId::ExtendSelection | CommandId::ShrinkSelection | CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections | CommandId::IndentSelection | CommandId::OutdentSelection | CommandId::ToggleComment | CommandId::MoveLinesUp | CommandId::MoveLinesDown | CommandId::DuplicateLinesUp | CommandId::DuplicateLinesDown | CommandId::DeleteLine | CommandId::Completion | CommandId::FormatDocument | CommandId::OrganizeImports | CommandId::QuickFix | CommandId::ReplaceMatch | CommandId::ReplaceAll) { return Some("Use CSV cell editing or switch to Source"); }
         if self.csv_pending() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
         if (self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || self.install_running.is_some()) && matches!(id,
-            CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
+            CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::MavenProfiles | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
             | CommandId::TrustProjectTools | CommandId::UntrustProjectTools | CommandId::FolderTrust
             | CommandId::RestartServer | CommandId::RebuildIndex | CommandId::ExcludeRubyTooling | CommandId::ResetProjectServerSettings) {
             return Some(if self.install_running.is_some() { "Waiting for the current installation to finish or stop" } else { "Waiting for language server settings to finish saving" });
@@ -3936,6 +3957,11 @@ impl Session {
                 Some((p, root)) if id == CommandId::ResetProjectServerSettings && !self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) => Some("This project already inherits global language server settings"),
                 _ => None,
             },
+            CommandId::MavenProfiles => match self.maven_project() {
+                Err(why) => Some(why),
+                Ok(project) if project.available.is_empty() => Some("This project's pom.xml declares no profiles"),
+                Ok(_) => None,
+            },
             CommandId::ServerRuntime => if self.state.provider_saves > 0 { Some("Waiting for provider settings to finish saving") }
                 else if self.runtime_kind().is_none() { Some("Open a Java or Node-based language source file to choose its server runtime") } else { None },
             CommandId::RestartServer => match self.state.provider() {
@@ -4073,6 +4099,11 @@ impl Session {
             CommandId::RebuildIndex,
         ] {
             rows.push((crate::chrome::toggle_text(id.label(), self.on(id)), Some(id)));
+        }
+        // Only in a Maven project JDT LS imports: elsewhere it would be one more disabled row.
+        if self.maven_project().is_ok_and(|p| !p.available.is_empty()) {
+            let at = rows.iter().position(|(_, id)| *id == Some(CommandId::ServerRuntime)).map_or(rows.len(), |i| i + 1);
+            rows.insert(at, (CommandId::MavenProfiles.label().to_owned(), Some(CommandId::MavenProfiles)));
         }
         rows
     }
@@ -4277,6 +4308,9 @@ impl Session {
         rows.extend(template.map(|(rows, _)| rows).unwrap_or_default());
         if let Some((p, root)) = self.state.project_provider() {
             rows.push(format!("Project settings for {}: {}", root.display(), if self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) { "project overrides global settings" } else { "inheriting global settings" }));
+            if let Some(maven) = self.maven_project().ok().filter(|m| !m.available.is_empty()) {
+                rows.push(format!("Maven profiles: {} (pom.xml declares {}; Maven Profiles… changes them)", if maven.active.is_empty() { "the defaults".to_owned() } else { maven.active.join(", ") }, maven.available.join(", ")));
+            }
             if semantics::provider::PROVIDERS[p].id == "ruby-lsp" {
                 rows.push(format!("Ruby tooling gem exclusions: {}. Exclusions reduce navigation into tooling gems; project files keep their normal coverage. A project .index.yml takes precedence over editor indexing settings.", if self.state.semantics.settings().ruby_tooling_excluded(&root) { "enabled" } else { "not applied" }));
             }
@@ -6304,6 +6338,7 @@ impl Session {
                 repaint
             }
             Command::ExcludeRubyTooling => self.save_project_provider(Some(true)),
+            Command::SetMavenProfiles(input) => self.save_maven_profiles(&input),
             Command::SetRubyToolingExclusions(on) => self.save_project_provider(Some(on)),
             Command::ResetProjectServerSettings => self.save_project_provider(None),
             Command::SetPersistentIndex(on) => {
@@ -6813,6 +6848,49 @@ impl Session {
         self.jobs.submit(Priority::Background, move || { let ok = settings.save(&file); let _ = tx.send_blocking(Completion::ProviderSettingsSaved { ok }); });
     }
 
+/// The active file's Maven project for JDT LS: its root, the profiles its pom.xml declares, and those Lenz activates
+    /// for the import (or why Maven Profiles… does not apply).
+    pub fn maven_project(&self) -> Result<MavenProject, &'static str> {
+        let doc = self.state.current_source().ok_or("No file is open")?;
+        let (provider, root) = self.state.project_provider().ok_or("Open a Java file in a Maven project")?;
+        if semantics::provider::PROVIDERS[provider].id != "jdtls" || doc.language() != Some(highlight::Language::Java) { return Err("Open a Java file in a Maven project"); }
+        let pom = root.join("pom.xml");
+        if !pom.is_file() { return Err("This Java project has no pom.xml"); }
+        let xml = semantics::maven::settings_path(self.state.semantics.settings_file(), &root);
+        let active = match semantics::provider::maven_settings_owner(self.state.semantics.settings(), &root, &xml) {
+            Some(false) => return Err(semantics::provider::OWN_MAVEN_SETTINGS),
+            Some(true) => self.maven_files.get(&xml, semantics::maven::active_in),
+            None => Vec::new(),
+        };
+        Ok(MavenProject { available: self.maven_files.get(&pom, semantics::maven::pom_profiles), active, root, xml })
+    }
+
+    /// What Maven Profiles… asks for: the active profiles as a list, and the profiles the pom.xml declares.
+    pub fn maven_profiles_prompt(&self) -> String {
+        match self.maven_project() {
+            Ok(p) => format!("pom.xml declares: {}. Comma-separated; empty uses the project's defaults. Saving restarts Eclipse JDT LS, which re-imports the project.", p.available.join(", ")),
+            Err(why) => why.into(),
+        }
+    }
+
+    fn save_maven_profiles(&mut self, input: &str) -> Effect {
+        if self.disabled(CommandId::MavenProfiles).is_some() { return Effect::default(); }
+        let Ok(project) = self.maven_project() else { return Effect::default() };
+        let profiles = semantics::maven::parse_list(input);
+        if let Some(unknown) = profiles.iter().find(|p| !project.available.contains(p)) {
+            self.state.messages.push(format!("Maven profiles were not changed: {unknown} is not a profile of this pom.xml (it declares {})", project.available.join(", ")));
+            return Effect { repaint: true, ..Effect::default() };
+        }
+        if profiles == project.active { return Effect::default(); }
+        let (file, tx) = (self.state.semantics.settings_file().to_owned(), self.tx.clone());
+        self.state.provider_saves += 1;
+        self.jobs.submit(Priority::Visible, move || {
+            let result = semantics::provider::set_maven_profiles(&file, &project.root, &project.xml, &profiles);
+            let _ = tx.send_blocking(Completion::MavenProfilesSaved { root: project.root, profiles, result });
+        });
+        Effect { repaint: true, ..Effect::default() }
+    }
+
     fn save_project_provider(&mut self, excluded: Option<bool>) -> Effect {
         let reset = excluded.is_none();
         let id = if reset { CommandId::ResetProjectServerSettings } else { CommandId::ExcludeRubyTooling };
@@ -7257,6 +7335,22 @@ impl Session {
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
+                Effect { repaint: true, copy: None, ..Effect::default() }
+            }
+            Completion::MavenProfilesSaved { root, profiles, result } => {
+                self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
+                match result {
+                    Ok(()) => {
+                        if let Some((provider, _)) = semantics::provider::for_language(highlight::Language::Java) {
+                            self.cancel_semantic_analysis();
+                            self.state.semantics.reload_project(provider, &root);
+                            self.synced = 0;
+                        }
+                        let which = if profiles.is_empty() { "its default profiles only".to_owned() } else { profiles.join(", ") };
+                        self.state.messages.push(format!("Maven profiles for {}: {which}. Eclipse JDT LS restarts and imports the project with them.", root.display()));
+                    }
+                    Err(why) => self.state.messages.push(format!("Maven profiles were not changed: {why}")),
+                }
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ProjectProviderSaved { provider, root, reset, result } => {

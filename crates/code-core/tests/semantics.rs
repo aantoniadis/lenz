@@ -1937,6 +1937,36 @@ fn jdtls_hears_of_build_file_changes_and_open_files_are_reopened_after_a_reimpor
     assert_eq!(closed, 1);
 }
 
+/// Maven Profiles… activates profiles of the project's pom.xml for JDT LS's import: Lenz writes them to a settings
+/// file of its own, points the project's `java.configuration.maven.globalSettings` at it and restarts the server
+/// with it; an unknown profile changes nothing.
+#[test]
+fn maven_profiles_are_given_to_jdtls_through_a_settings_file_of_lenzs() {
+    let pom = "<project><profiles><profile><id>benchmarks</id></profile><profile><id>release</id></profile></profiles></project>\n";
+    let files = [("pom.xml", pom), ("src/A.java", "class A {}\n")];
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_JDT", "1")], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/A.java");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
+    assert_eq!(f.s.disabled(CommandId::MavenProfiles), None);
+    let project = f.s.maven_project().unwrap();
+    assert_eq!((project.available.clone(), project.active.clone()), (vec!["benchmarks".to_owned(), "release".to_owned()], vec![]));
+    assert!(f.s.maven_profiles_prompt().contains("pom.xml declares: benchmarks, release"), "{}", f.s.maven_profiles_prompt());
+    assert!(f.s.language_server_details().contains("Maven profiles: the defaults (pom.xml declares benchmarks, release;"));
+    f.s.dispatch(Command::SetMavenProfiles("nightly".into()));
+    assert!(f.notice("nightly is not a profile of this pom.xml"), "{:?}", f.s.state().notices());
+    f.s.dispatch(Command::SetMavenProfiles("benchmarks".into()));
+    f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Maven profiles for")));
+    assert_eq!(code_core::semantics::maven::active_in(&project.xml), ["benchmarks"]);
+    // Restarted with the file as its Maven global settings (added to the user's own ~/.m2/settings.xml).
+    let log = f.log.clone();
+    let xml = project.xml.display().to_string();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "initialize").any(|m| m["params"]["initializationOptions"]["settings"]["java"]["configuration"]["maven"]["globalSettings"] == xml.as_str()));
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
+    assert_eq!(f.s.maven_project().unwrap().active, ["benchmarks"]);
+    assert!(f.s.language_server_details().contains("Maven profiles: benchmarks (pom.xml declares benchmarks, release;"));
+}
+
 #[test]
 fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session() {
     let files = [("pom.xml", ""), ("src/A.java", "class A {\n    void m() { virt(); }\n}\n")];

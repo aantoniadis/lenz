@@ -9,6 +9,7 @@ pub mod hierarchy;
 pub mod hover;
 pub mod lsp;
 pub mod java;
+pub mod maven;
 pub mod python;
 pub mod runtime;
 pub mod provider;

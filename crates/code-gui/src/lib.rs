@@ -128,6 +128,8 @@ pub enum Modal {
     /// server's own discovery).
     Root { path: String },
     SqlMetadata { path: String },
+    /// Maven Profiles…: the active profiles, typed as a list.
+    MavenProfiles { path: String },
     ServerRuntime { path: String, at: usize },
     /// The text's context menu, opened at a point: its entries and the highlighted one.
     Context { entries: Vec<MenuEntry>, at: usize, x: f32, y: f32, scroll: f32 },
@@ -1623,6 +1625,11 @@ impl ReaderView {
                         cx.notify();
                     }
                 }
+                InterfaceAction::MavenProfiles => {
+                    let path = self.session.maven_project().map(|p| p.active.join(", ")).unwrap_or_default();
+                    self.modal = Some(Modal::MavenProfiles { path });
+                    cx.notify();
+                }
                 InterfaceAction::WorkspaceRoot => {
                     let path = self.session.state().provider().and_then(|v| v.root).map(|r| r.display().to_string()).unwrap_or_default();
                     self.modal = Some(Modal::Root { path });
@@ -2205,7 +2212,7 @@ impl ReaderView {
                     None => self.modal = Some(Modal::Places { list, query, at }),
                 }
             }
-            m @ Some(Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::Keymap { .. }) => self.modal = m,
+            m @ Some(Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::MavenProfiles { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::Keymap { .. }) => self.modal = m,
             None => {}
         }
     }
@@ -2243,7 +2250,7 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::MavenProfiles { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -2882,14 +2889,15 @@ impl ReaderView {
             return;
         }
         let metadata_input = matches!(self.modal, Some(Modal::SqlMetadata { .. }));
-        if let Some(Modal::Root { path } | Modal::SqlMetadata { path }) = &mut self.modal {
+        let profiles_input = matches!(self.modal, Some(Modal::MavenProfiles { .. }));
+        if let Some(Modal::Root { path } | Modal::SqlMetadata { path } | Modal::MavenProfiles { path }) = &mut self.modal {
             match key {
                 "escape" => self.modal = None,
                 "backspace" => {
                     path.pop();
                 }
                 "enter" => {
-                    let command = if metadata_input { Command::ConfigureSqlMetadata(path.clone()) } else { Command::SetWorkspaceRoot(Some(PathBuf::from(path.trim())).filter(|p| !p.as_os_str().is_empty())) };
+                    let command = if metadata_input { Command::ConfigureSqlMetadata(path.clone()) } else if profiles_input { Command::SetMavenProfiles(path.clone()) } else { Command::SetWorkspaceRoot(Some(PathBuf::from(path.trim())).filter(|p| !p.as_os_str().is_empty())) };
                     self.modal = None;
                     self.dispatch(command, cx);
                 }
@@ -2965,7 +2973,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } | Modal::Keymap { .. }) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::MavenProfiles { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } | Modal::Keymap { .. }) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -5928,6 +5936,7 @@ impl ReaderView {
                 vec![(format!("› {query}"), None), ("Find symbols (language server) — results below; Enter to browse them; Tab: syntactic declarations".to_string(), None)]
             }
             Some(Modal::SqlMetadata { path }) => vec![(format!("› {path}"), None), (self.session.sql_metadata_prompt().into(), None)],
+            Some(Modal::MavenProfiles { path }) => vec![(format!("› {path}"), None), (self.session.maven_profiles_prompt(), None)],
             Some(Modal::Root { path }) => {
                 vec![(format!("› {path}"), None), ("Workspace root for this file's language server — Enter; empty uses its own discovery".to_string(), None)]
             }
@@ -7662,7 +7671,7 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
 
 impl Modal {
     fn is_form(&self) -> bool {
-        matches!(self, Self::OpenPath { .. } | Self::Create { .. } | Self::SaveAs { .. } | Self::RenameTerminal { .. } | Self::WorkspaceInput { .. } | Self::Relocate { .. } | Self::PasteEntry { .. } | Self::ConfirmDelete { .. } | Self::NewBranch { .. } | Self::Revision { .. } | Self::GoTo { .. } | Self::Root { .. } | Self::SqlMetadata { .. })
+        matches!(self, Self::OpenPath { .. } | Self::Create { .. } | Self::SaveAs { .. } | Self::RenameTerminal { .. } | Self::WorkspaceInput { .. } | Self::Relocate { .. } | Self::PasteEntry { .. } | Self::ConfirmDelete { .. } | Self::NewBranch { .. } | Self::Revision { .. } | Self::GoTo { .. } | Self::Root { .. } | Self::SqlMetadata { .. } | Self::MavenProfiles { .. })
     }
 
     /// The highlighted row of [`ReaderView::modal_rows`].
@@ -7673,7 +7682,7 @@ impl Modal {
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
             Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::NewScratch { at, .. } | Modal::ScratchFiles { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::MavenProfiles { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
             Modal::Context { at, .. } => *at,
             Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::BranchMenu { at, .. } => *at + 1,

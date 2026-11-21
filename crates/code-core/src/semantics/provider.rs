@@ -649,6 +649,9 @@ fn rust_env(root: &Path, cache: &Path) -> Vec<(String, String)> {
 }
 
 /// FNV-1a of `text`: stable folder names.
+/// [`fnv`] of a path, as named for its folders in the cache and Lenz's Maven settings.
+pub(crate) fn fnv_path(path: &Path) -> u64 { fnv(&path.display().to_string()) }
+
 fn fnv(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
@@ -1359,6 +1362,62 @@ pub fn set_ruby_tooling_excluded(file: &Path, root: &Path, enabled: bool) -> Res
         if enabled && restore { indexing.insert("includedGems".into(), json!(included)); }
         Ok(())
     })
+}
+
+/// Activate `profiles` (none: the default ones) for JDT LS's Maven import of `root`: write them to `xml` and point the
+/// project's `java.configuration.maven.globalSettings` at it, or with none remove both. Refused when the user's own
+/// settings name another file there: theirs stays.
+pub fn set_maven_profiles(file: &Path, root: &Path, xml: &Path, profiles: &[String]) -> Result<(), String> {
+    let key = root.to_str().ok_or("Project path must be valid UTF-8")?;
+    let xml_text = xml.to_str().ok_or("Lenz's settings folder must be a UTF-8 path")?.to_owned();
+    update_settings(file, "jdtls", "Java project", |provider| {
+        let typed = serde_json::from_value::<ProviderSettings>(Value::Object(provider.clone())).map_err(|e| format!("Invalid JDT LS provider settings: {e}"))?;
+        let settings = Settings { providers: [("jdtls".into(), typed)].into_iter().collect(), ..Settings::default() };
+        if maven_settings_owner(&settings, root, xml) == Some(false) { return Err(OWN_MAVEN_SETTINGS.into()); }
+        let projects = provider.entry("projects").or_insert_with(|| json!({})).as_object_mut().ok_or("projects must be an object")?;
+        let project = projects.entry(key).or_insert_with(|| json!({})).as_object_mut().ok_or("Project settings must be an object")?;
+        let mut node = project;
+        for name in ["settings", "java", "configuration"] {
+            node = node.entry(name).or_insert_with(|| json!({})).as_object_mut().ok_or("Project JDT LS settings must be objects")?;
+        }
+        let maven = node.entry("maven").or_insert_with(|| json!({})).as_object_mut().ok_or("Project Maven settings must be an object")?;
+        if profiles.is_empty() {
+            maven.remove("globalSettings");
+            let _ = std::fs::remove_file(xml);
+        } else {
+            if let Some(parent) = xml.parent() { std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?; }
+            std::fs::write(xml, super::maven::settings_xml(profiles)).map_err(|e| format!("Cannot write {}: {e}", xml.display()))?;
+            maven.insert("globalSettings".into(), json!(xml_text));
+        }
+        // Empty objects left by a removal go too.
+        prune(provider.get_mut("projects").and_then(|p| p.get_mut(key)));
+        if provider.get("projects").and_then(|p| p.get(key)).is_some_and(|p| p.as_object().is_some_and(serde_json::Map::is_empty)) {
+            provider.get_mut("projects").and_then(Value::as_object_mut).map(|p| p.remove(key));
+        }
+        if provider.get("projects").is_some_and(|p| p.as_object().is_some_and(serde_json::Map::is_empty)) { provider.remove("projects"); }
+        Ok(())
+    })
+}
+
+/// Why Maven Profiles… cannot change a project: the user's settings name their own Maven settings file.
+pub const OWN_MAVEN_SETTINGS: &str = "Your provider settings set java.configuration.maven.globalSettings for this project; Lenz leaves it as it is";
+
+/// Who set `root`'s `java.configuration.maven.globalSettings`: Lenz (its file at `xml`), the user (another file), or
+/// nobody (`None`).
+pub fn maven_settings_owner(settings: &Settings, root: &Path, xml: &Path) -> Option<bool> {
+    let (_, jdtls) = for_language(Language::Java)?;
+    let options = settings.initialization(jdtls, Some(root));
+    let named = options["settings"]["java"]["configuration"]["maven"]["globalSettings"].as_str()?;
+    Some(Path::new(named) == xml)
+}
+
+fn prune(value: Option<&mut Value>) {
+    let Some(Value::Object(map)) = value else { return };
+    let keys: Vec<String> = map.keys().cloned().collect();
+    for k in keys {
+        prune(map.get_mut(&k));
+        if map.get(&k).is_some_and(|v| v.as_object().is_some_and(serde_json::Map::is_empty)) { map.remove(&k); }
+    }
 }
 
 /// Remove only this provider/workspace override; global and other projects' settings remain intact.

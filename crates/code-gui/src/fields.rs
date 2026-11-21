@@ -52,6 +52,7 @@ impl ReaderView {
             | Modal::Relocate { input, .. } => (input.as_str(), None, false, 0),
             Modal::Root { path }
             | Modal::SqlMetadata { path }
+            | Modal::MavenProfiles { path }
             | Modal::ServerRuntime { path, .. } => (path.as_str(), None, false, 0),
             Modal::Branches { query, .. }
             | Modal::ScratchFiles { query, .. }
@@ -151,6 +152,7 @@ impl ReaderView {
                 | Modal::NewBranch { name, .. } => name,
                 Modal::Root { path }
                 | Modal::SqlMetadata { path }
+                | Modal::MavenProfiles { path }
                 | Modal::ServerRuntime { path, .. } => path,
                 Modal::Branches { query, .. }
                 | Modal::ScratchFiles { query, .. }

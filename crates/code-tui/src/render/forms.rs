@@ -16,6 +16,7 @@ impl App {
             Prompt::GoTo => Form::GoTo,
             Prompt::WorkspaceRoot => Form::Workspace,
             Prompt::SqlMetadata => Form::SqlMetadata,
+            Prompt::MavenProfiles => Form::MavenProfiles,
             _ => return None,
         };
         Some(self.session.form_text(form))

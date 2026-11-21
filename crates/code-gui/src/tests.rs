@@ -5325,6 +5325,7 @@ fn clicks_inside_input_modals_keep_them_including_go_to_line(cx: &mut TestAppCon
     let inputs = [
         Modal::Declarations { query: "x".into(), semantic: false },
         Modal::Root { path: "x".into() },
+        Modal::MavenProfiles { path: "x".into() },
     ];
     for modal in inputs {
         f.view.update(&mut v, |r, cx| {

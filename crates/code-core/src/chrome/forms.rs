@@ -16,6 +16,7 @@ pub enum Form<'a> {
     GoTo,
     Workspace,
     SqlMetadata,
+    MavenProfiles,
 }
 
 pub struct FormText {
@@ -44,6 +45,7 @@ impl Session {
             Form::GoTo => ("Go to Line", Some("Line : column"), "Enter a line number, optionally followed by :column.".into(), "Go", false),
             Form::Workspace => ("Language Server Workspace", Some("Folder path"), "Leave empty to restore automatic workspace discovery.".into(), "Apply", false),
             Form::SqlMetadata => ("Configure SQL Metadata", Some("Source"), self.sql_metadata_prompt().into(), "Configure", false),
+            Form::MavenProfiles => ("Maven Profiles", Some("Active profiles"), self.maven_profiles_prompt(), "Save and Restart", false),
         };
         FormText { title, field, description, submit, destructive }
     }
