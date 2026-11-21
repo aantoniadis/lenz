@@ -1021,16 +1021,17 @@ fn markdown_header_buttons_target_their_own_pane_and_respect_modals(cx: &mut Tes
                 }
             };
             let click = |visual: &mut VisualTestContext, tui: &mut App, pane| {
+                // Both float at the top-right of the file's text, off the tab row.
                 let point = gui.read_with(visual, |v, _| {
                     let g = *v.panes.iter().find(|g| g.pane == pane).unwrap();
                     let (button, _) = v.preview_button(g).unwrap();
-                    assert!(button.left() >= gpui::px(g.bar.0) && button.right() <= gpui::px(g.bar.1));
-                    button.center()
+                    assert!(g.text.contains(&button.origin) && button.right() <= g.text.right() && button.top() > gpui::px(g.bar.2));
+                    v.preview_target(g).unwrap().center()
                 });
                 visual.simulate_click(point, gpui::Modifiers::default());
                 let g = tui.layout.panes.iter().find(|p| p.pane == pane).unwrap();
                 let (_, b) = g.controls.iter().find(|(id, _)| *id == CommandId::MarkdownSource).unwrap();
-                assert!(g.tabs.iter().all(|(_, tab)| tab.right() <= b.x));
+                assert!(b.y == g.text.y && b.right() <= g.text.right() && b.x >= g.text.x);
                 tui.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: b.x + 1, row: b.y, modifiers: KeyModifiers::NONE }));
             };
             settle(&mut visual, &mut tui);
@@ -5508,8 +5509,15 @@ fn gui_and_terminal_mark_the_same_changes_against_head_through_edit_save_and_und
         let markers = s.active().and_then(|tab| s.markers(tab.id()))?;
         Some((
             markers.baseline().map(code_core::markers::Baseline::kind),
-            // The transient catch-up suffix is a timing detail, not a different marker.
-            markers.summary().map(|summary| summary.replace(" (updating…)", "")),
+            // The transient catch-up suffix is a timing detail, not a different marker. Each adapter has its own
+            // repository, committed a moment apart: their commit ids differ when a second passes between them.
+            markers.summary().map(|summary| {
+                let summary = summary.replace(" (updating…)", "");
+                match summary.split_once(" · ").and_then(|(head, rest)| Some((head, rest.split_once(')')?.1))) {
+                    Some((head, rest)) => format!("{head} · <commit>){rest}"),
+                    None => summary,
+                }
+            }),
             (0..3).map(|line| format!("{}{}", markers.change(line).map_or(" ", code_core::markers::LineChange::letter), if markers.deleted_above(line) > 0 { "D" } else { " " })).collect::<Vec<_>>(),
         ))
     };
