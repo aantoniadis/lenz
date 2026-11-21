@@ -1665,6 +1665,8 @@ pub enum Completion {
     ProjectProviderSaved { provider: usize, root: PathBuf, reset: bool, result: Result<(), String> },
     /// Maven profiles saved for JDT LS's import of `root` (or why not).
     MavenProfilesSaved { root: PathBuf, profiles: Vec<String>, result: Result<(), String> },
+    /// The class `this` names, from a parse made for Go to Definition (the tab held none): `class` is its name's bytes.
+    ThisClass { request: u64, tab: TabId, version: u64, class: Option<std::ops::Range<usize>> },
     /// The project's saved places read from `from` (or why not), for saving to `file` (a different file when `from`
     /// is its name before names were canonical).
     PlacesRead { generation: u64, file: PathBuf, from: PathBuf, result: Result<crate::places::Places, crate::places::ReadError> },
@@ -1849,6 +1851,7 @@ impl Input {
                 Completion::Sql(_) | Completion::SqlMetadata { .. } => "SQL assistance",
                 Completion::ServerRuntimeSaved { .. } => "Server runtime saved",
                 Completion::MavenProfilesSaved { .. } => "Maven profiles saved",
+                Completion::ThisClass { .. } => "this class",
                 Completion::ProviderSettingsSaved { .. } => "provider settings saved",
                 Completion::ProjectProviderSaved { .. } => "project provider settings saved",
                 Completion::Watch { .. } => "watch",
@@ -1870,6 +1873,13 @@ impl Input {
             },
         }
     }
+}
+
+/// The name of the innermost class, enum, record or interface around byte `at`. shortcut: an anonymous class's `this`
+/// lands on the named class around it; upgrade when declarations record anonymous classes.
+fn this_class(declarations: &lenz_content::highlight::Declarations, at: u32) -> Option<std::ops::Range<usize>> {
+    let class = declarations.enclosing(at).into_iter().rev().find(|d| matches!(d.kind, lenz_content::highlight::DeclKind::Type | lenz_content::highlight::DeclKind::Interface))?;
+    Some(class.name_range.start as usize..class.name_range.end as usize)
 }
 
 /// A Maven project JDT LS imports, for Maven Profiles…: its root, the profiles its pom.xml declares, those Lenz
@@ -3263,6 +3273,8 @@ pub struct Session {
     pending_goto: Option<(PathBuf, Goto)>,
     search_seq: u64,
     semantic_seq: u64,
+    /// The latest Go to Definition on `this` parsing its file: an older parse stops.
+    this_latest: Arc<std::sync::atomic::AtomicU64>,
     /// The documentation request: its id, and the tab, version, name and trigger it is about.
     pending_doc: Option<DocumentationRequest>,
     pending_completion: Option<completion::CompletionRequest>,
@@ -3554,6 +3566,7 @@ impl Session {
             pending_goto: None,
             search_seq: 0,
             semantic_seq: 0,
+            this_latest: Default::default(),
             pending_highlight: None,
             pending_doc: None,
             pending_completion: None,
@@ -6594,8 +6607,25 @@ impl Session {
         if self.state.tabs.iter().any(|t| t.id == tab && t.read_only_side().is_some()) { return Effect::default(); }
         // `this` names the class around it: land on that class's name, as IntelliJ does (JDT LS answers nothing).
         // Before any wait for the server: a busy one may not hold this text yet.
-        if ask == Ask::Definition && self.state.active == Some(tab) && let Some(name) = self.this_target(tab, offset) {
-            return self.select_in_active(name);
+        // A newer ask supersedes a `this` parse still running.
+        self.this_latest.fetch_add(1, Ordering::Relaxed);
+        if ask == Ask::Definition && self.state.active == Some(tab) && let Some((at, language)) = self.this_at(tab, offset) {
+            if let Some(name) = self.state.view(tab).and_then(|v| v.declarations().and_then(|d| this_class(d, at))) { return self.select_in_active(name); }
+            // No parse held (breadcrumbs and sticky scroll off): one of its own, off the UI thread.
+            if let Some(view) = self.state.view(tab) {
+                let snapshot = view.snapshot();
+                let (version, text) = (snapshot.key().version, snapshot.copy_range(0..snapshot.len_bytes()).unwrap_or_default());
+                // Its own count: caret moves ask the server too (occurrences), and must not make this one stale.
+                let latest = self.this_latest.clone();
+                let request = latest.fetch_add(1, Ordering::Relaxed) + 1;
+                let tx = self.tx.clone();
+                self.jobs.submit(Priority::Visible, move || {
+                    let current = { let latest = latest.clone(); move || latest.load(Ordering::Relaxed) == request };
+                    let class = lenz_content::highlight::declarations_while(language, text.into(), current).and_then(|d| this_class(&d, at));
+                    let _ = tx.send_blocking(Completion::ThisClass { request, tab, version, class });
+                });
+                return Effect::default();
+            }
         }
         self.semantic_seq += 1;
         let request = self.semantic_seq;
@@ -6636,19 +6666,16 @@ impl Session {
     /// document's tab holds for this version (for breadcrumbs and sticky scroll, both on by default). `None`: not
     /// `this`, or no current parse (the server is asked as for any name). shortcut: an anonymous class's `this` lands
     /// on the named class around it; upgrade when declarations record anonymous classes.
-    fn this_target(&self, tab: TabId, offset: usize) -> Option<std::ops::Range<usize>> {
+    fn this_at(&self, tab: TabId, offset: usize) -> Option<(u32, highlight::Language)> {
         use highlight::Language as L;
-        let view = self.state.view(tab)?;
-        let snapshot = view.snapshot();
-        if !matches!(snapshot.language()?, L::Java | L::Kotlin | L::JavaScript | L::TypeScript | L::Tsx | L::CSharp | L::Cpp) { return None; }
+        let snapshot = self.state.view(tab)?.snapshot();
+        let language = snapshot.language()?;
+        if !matches!(language, L::Java | L::Kotlin | L::JavaScript | L::TypeScript | L::Tsx | L::CSharp | L::Cpp) { return None; }
         let line = snapshot.line_range(snapshot.line_of(offset))?;
         let text = snapshot.copy_range(line.clone())?;
         let col = offset.checked_sub(line.start)?;
         let word = crate::document::identifier(&text, col).or_else(|| col.checked_sub(1).filter(|c| text.is_char_boundary(*c)).and_then(|c| crate::document::identifier(&text, c)))?;
-        if text.get(word.clone()) != Some("this") { return None; }
-        let class = view.declarations()?.enclosing((line.start + word.start) as u32).into_iter().rev()
-            .find(|d| matches!(d.kind, lenz_content::highlight::DeclKind::Type | lenz_content::highlight::DeclKind::Interface))?;
-        Some(class.name_range.start as usize..class.name_range.end as usize)
+        (text.get(word.clone()) == Some("this")).then_some(((line.start + word.start) as u32, language))
     }
 
     /// Select `range` of the active document and show it, as a jump Back returns from.
@@ -7422,6 +7449,14 @@ impl Session {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
                 Effect { repaint: true, copy: None, ..Effect::default() }
+            }
+            Completion::ThisClass { request, tab, version, class } => {
+                // Only the latest ask, about the text still shown.
+                if request != self.this_latest.load(Ordering::Relaxed) || self.state.active != Some(tab) || self.state.view(tab).is_none_or(|v| v.snapshot().key().version != version) { return Effect::default(); }
+                match class {
+                    Some(name) => self.select_in_active(name),
+                    None => { self.state.messages.push(format!("{}: no class around `this`", Ask::Definition.label())); Effect { repaint: true, ..Effect::default() } }
+                }
             }
             Completion::MavenProfilesSaved { root, profiles, result } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);

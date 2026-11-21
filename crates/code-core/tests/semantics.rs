@@ -2021,6 +2021,25 @@ fn definition_on_this_lands_on_the_enclosing_class() {
     assert!((at..at + 4).contains(&f.s.state().selection().unwrap().head), "back on `this`");
 }
 
+/// With breadcrumbs and sticky scroll off the tab holds no parse: Go to Definition on `this` makes one of its own, off
+/// the UI thread, and lands on the class; the server is not asked.
+#[test]
+fn definition_on_this_parses_when_the_tab_holds_no_parse() {
+    let source = "package demo;\n\npublic class Holder {\n    private final int value;\n\n    public Holder(int value) {\n        this.value = value;\n    }\n}\n";
+    let files = [("pom.xml", "<project/>\n"), ("src/demo/Holder.java", source)];
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_JDT", "1")], &files, serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::SetBreadcrumbs(false));
+    f.s.dispatch(Command::SetStickyScroll(false));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/demo/Holder.java");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
+    assert!(f.s.state().active().and_then(|t| f.s.state().view(t.id())).unwrap().declarations().is_none(), "no parse held");
+    f.definition("this.value", false);
+    f.settle(|s| s.state().selection().is_some_and(|sel| sel.anchor != sel.head));
+    assert_eq!(f.selected_text(), "Holder");
+    assert!(!messages(&f.log).iter().any(|m| m["method"] == "textDocument/definition"), "the server is not asked about `this`");
+}
+
 /// The class `this` names is found with no server holding the text: in a folder never trusted, JDT LS does not start.
 #[test]
 fn definition_on_this_needs_no_server() {
