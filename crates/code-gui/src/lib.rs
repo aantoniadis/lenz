@@ -2107,7 +2107,7 @@ impl ReaderView {
             Some(Modal::ServerRuntime { path, at }) => {
                 let choice = self.session.state().server_runtime().and_then(|m| m.choices(&path).get(at).cloned());
                 self.modal = Some(Modal::ServerRuntime { path, at });
-                if let Some((_, path)) = choice {
+                if let Some((_, _, path)) = choice {
                     if let Some(Modal::ServerRuntime { path: input, .. }) = &mut self.modal { *input = path.as_ref().map_or_else(String::new, |p| p.display().to_string()); }
                     self.dispatch(Command::SetServerRuntime(path), cx);
                 }
@@ -5823,10 +5823,13 @@ impl ReaderView {
             Some(Modal::Navigation { .. }) => self.navigation_rows(),
             Some(Modal::ServerRuntime { path, .. }) => {
                 let model = self.session.state().server_runtime();
-                let mut rows = vec![(format!("{} › {path}", model.map_or("Server runtime executable / install folder", |m| m.kind.input_label())), None), ("Enter a path or select an installed runtime; Escape closes".to_string(), None)];
+                let mut rows = vec![(format!("{} › {path}", model.map_or("Server runtime executable / install folder", |m| m.kind.input_label())), None),
+                    (format!("{} · Enter restarts it", model.map_or_else(|| "Language server runtime".to_owned(), |m| m.title())), None)];
                 if let Some(model) = model {
-                    rows.extend(model.choices(path).into_iter().map(|(label, _)| (label, self.session.disabled(CommandId::ServerRuntime))));
-                    rows.extend(wrap(&model.message, self.columns(menu_width(self.width) - 24.0)).into_iter().map(|line| (line, None)));
+                    // The name, then its path in a column of its own.
+                    let name_w = model.choices(path).iter().map(|(name, ..)| name.chars().count()).max().unwrap_or(0) + 3;
+                    rows.extend(model.choices(path).into_iter().map(|(name, detail, _)| (match detail { Some(d) => format!("{name:<name_w$}{d}"), None => name }, self.session.disabled(CommandId::ServerRuntime))));
+                    rows.extend(wrap(&model.message, self.columns(menu_width(self.width) - 24.0)).into_iter().filter(|l| !l.trim().is_empty()).map(|line| (line, None)));
                 }
                 rows
             }

@@ -3166,7 +3166,8 @@ fn server_runtime_selection_saves_restarts_and_keeps_disabled_servers_disabled()
     let settings = f._dir.path().join("config/providers.json");
     let before = std::fs::read(&settings).unwrap();
     f.s.dispatch(Command::OpenServerRuntime);
-    f.settle(|s| s.state().server_runtime().unwrap().message.starts_with("Enter"));
+    // Discovery has finished: no "Finding installed … runtimes…" any more.
+    f.settle(|s| !s.state().server_runtime().unwrap().message.starts_with("Finding"));
     f.s.dispatch(Command::CloseServerRuntime);
     assert!(f.s.state().server_runtime().is_none());
     assert_eq!(std::fs::read(&settings).unwrap(), before);

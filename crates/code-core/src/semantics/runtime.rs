@@ -46,15 +46,32 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn choices(&self, input: &str) -> Vec<(String, Option<PathBuf>)> {
-        let entered = (!input.trim().is_empty()).then(|| PathBuf::from(input.trim()));
-        let mut choices = vec![
-            ("Save entered path and restart".into(), entered),
-            (format!("Restore automatic {} selection and restart", self.kind.label()), None),
-        ];
-        choices.extend(self.candidates.iter().map(|p| (format!("Use {} and restart", p.display()), Some(p.clone()))));
+    /// What the chooser is for: "Java runtime for Eclipse JDT LS".
+    pub fn title(&self) -> String {
+        let server = provider::PROVIDERS.iter().find(|p| p.id == self.kind.provider()).map_or("the language server", |p| p.name);
+        format!("{} runtime for {server}", self.kind.label())
+    }
+
+    /// Each choice's name, the path it stands for (shown beside it, dimmer) and what it saves (`None`: automatic).
+    /// Choosing one saves it and restarts the server. The entered path leads once something is typed; the runtime in
+    /// use says so.
+    pub fn choices(&self, input: &str) -> Vec<(String, Option<String>, Option<PathBuf>)> {
+        let in_use = |path: Option<&PathBuf>| if path == self.configured.as_ref() { " · in use" } else { "" };
+        let entered = input.trim();
+        let mut choices = Vec::new();
+        if !entered.is_empty() {
+            choices.push(("Use the entered path".to_owned(), Some(entered.to_owned()), Some(PathBuf::from(entered))));
+        }
+        choices.push((format!("Automatic{}", in_use(None)), Some(format!("the first {} on PATH", self.kind.label())), None));
+        choices.extend(self.candidates.iter().map(|p| (format!("{}{}", runtime_name(p), in_use(Some(p))), Some(p.display().to_string()), Some(p.clone()))));
         choices
     }
+}
+
+/// A runtime's short name: its install folder (`java-21-openjdk` for `/usr/lib/jvm/java-21-openjdk/bin/java`).
+fn runtime_name(path: &Path) -> String {
+    let parent = path.parent().filter(|p| p.file_name().is_some_and(|n| n == "bin")).and_then(Path::parent).or(path.parent());
+    parent.and_then(Path::file_name).map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 pub fn configured(kind: Kind, settings: &provider::Settings) -> Option<PathBuf> {
@@ -498,4 +515,22 @@ mod tests {
 
 
 
+}
+
+#[cfg(test)]
+mod chooser_tests {
+    use super::*;
+
+    #[test]
+    fn choices_name_each_runtime_mark_the_one_in_use_and_offer_a_typed_path_first() {
+        let (j27, j21) = (PathBuf::from("/usr/lib/jvm/java-27-openjdk/bin/java"), PathBuf::from("/usr/lib/jvm/java-21-openjdk/bin/java"));
+        let model = Runtime { kind: Kind::Java, configured: Some(j21.clone()), candidates: vec![j27.clone(), j21.clone()], message: String::new() };
+        assert_eq!(model.title(), "Java runtime for Eclipse JDT LS");
+        let names = |input: &str| model.choices(input).into_iter().map(|(name, _, path)| (name, path)).collect::<Vec<_>>();
+        assert_eq!(names(""), [("Automatic".into(), None), ("java-27-openjdk".into(), Some(j27.clone())), ("java-21-openjdk · in use".into(), Some(j21.clone()))]);
+        assert_eq!(names(" /opt/jdk/bin/java ")[0], ("Use the entered path".into(), Some(PathBuf::from("/opt/jdk/bin/java"))));
+        let automatic = Runtime { configured: None, ..model };
+        assert_eq!(automatic.choices("")[0].0, "Automatic · in use");
+        assert_eq!(runtime_name(Path::new("/opt/node")), "opt", "no bin folder: the parent");
+    }
 }

@@ -1275,9 +1275,9 @@ impl App {
                         model
                             .choices(&modal.input)
                             .into_iter()
-                            .map(|(label, path)| Choice {
+                            .map(|(label, detail, path)| Choice {
                                 label,
-                                detail: None,
+                                detail,
                                 section: None,
                                 disabled: self.session.disabled(CommandId::ServerRuntime),
                                 target: ChoiceTarget::ServerRuntime(path),
@@ -1467,7 +1467,7 @@ impl App {
                 Prompt::SqlMetadata => self.session.sql_metadata_prompt(),
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
                 Prompt::ServerRuntime => {
-                    "Server runtime executable / install folder · Enter saves and restarts"
+                    "Language server runtime · type a path or choose · Enter restarts the server with it"
                 }
                 Prompt::RecentRoots => "Recent folders",
                 Prompt::Navigation => "Search Everywhere · Tab scope · ↑↓ select · Enter open",

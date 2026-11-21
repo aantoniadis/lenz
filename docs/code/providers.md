@@ -581,13 +581,14 @@ Ticket 57: the routing seam templates are served through. The table records tick
 ## Repairing a Java server runtime in the reader
 
 In either frontend, open a Java file, press **F2** (Language Server Status), then choose **Choose Language Server Runtime…**.
-Select a detected Java executable, or enter/paste an executable path or JDK home folder and choose **Save entered
-path and restart**. Lenz runs `java -version` with a three-second timeout, saves the JDT LS `--java-executable`
+Each detected Java is listed by its install folder and path, the one in use marked **in use**. Select one, or
+enter/paste an executable path or JDK home folder and choose **Use the entered path**; Enter restarts the server
+with it. Lenz runs `java -version` with a three-second timeout, saves the JDT LS `--java-executable`
 argument in `providers.json`, and restarts enabled Java servers. Other provider settings and disabled states are
 preserved. Invalid paths, malformed settings and save errors are shown in the dialog without replacing the
 existing settings. Escape before saving cancels; a save already submitted continues after dismissal.
 
-**Restore automatic Java selection and restart** removes the override. This does not install Java or JDT LS, or
+**Automatic** (the first Java on PATH) removes the override. This does not install Java or JDT LS, or
 verify the runtime meets the installed JDT LS version's requirements: check the LSP status after restarting and
 use **Copy Language Server Details** for the complete failure report, including configured arguments. Missing
 servers still require installation; disabled servers can be enabled from the same status dialog.
@@ -607,7 +608,7 @@ installation containing Pyright, or paste its `bin/node` executable or installat
 `node --version`; saving records only `providers.pyright.node` and restarts enabled Pyright servers. Lenz Code
 then prefers the matching `pyright-langserver` beside that Node installation and prepends its bin folder to
 that provider's PATH. Custom executables, arguments, environment, other providers and disabled states are
-preserved. **Restore automatic Node.js selection and restart** removes only this override.
+preserved. **Automatic** removes only this override.
 
 A mise message such as “No version is set for shim: pyright-langserver” means the selected mise installation
 cannot provide that shim; it does not prove Pyright is incompatible with the selected Node version. Choose an

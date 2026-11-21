@@ -7271,7 +7271,7 @@ impl Session {
             Completion::ServerInstalled { request, result } => self.server_installed(request, result),
             Completion::ServerRuntimes { request, paths } => {
                 if request != self.runtime_request { return Effect::default(); }
-                if let Some(model) = &mut self.state.server_runtime { model.candidates = paths; model.message = format!("Enter {}, or choose an installed runtime below", model.kind.input_label()); }
+                if let Some(model) = &mut self.state.server_runtime { model.message = if paths.is_empty() { format!("No installed {} runtime was found. Type the path to its executable or install folder above.", model.kind.label()) } else { String::new() }; model.candidates = paths; }
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ProjectFormatted { request, result } => self.project_formatted(request, result),
