@@ -4073,6 +4073,7 @@ impl ReaderView {
         if self.activity_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::ToggleActivityLog, window, cx); }
         if self.restricted_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::FolderTrust, window, cx); }
         if self.results_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::ToggleResults, window, cx); }
+        if self.details_button().is_some_and(|(b, _)| b.contains(&ev.position)) { return self.run(CommandId::StatusDetails, window, cx); }
         if let Some(l) = self.activity_layout() && l.bounds.contains(&ev.position) {
             self.log_focus = true;
             if let Some((_, id, _)) = l.buttons.iter().find(|(b, _, _)| b.contains(&ev.position)) { self.run(*id, window, cx); }
@@ -4785,7 +4786,7 @@ impl ReaderView {
     /// Independent footer cells; narrow windows keep recovery and message targets accessible.
     fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell, CommandId) {
         let left = STATUS_PAD.min(self.width / 2.0);
-        let right = self.results_button().or_else(|| self.activity_button()).map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
+        let right = self.results_button().or_else(|| self.details_button()).or_else(|| self.activity_button()).map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
         let room = right - left;
         let position = self.session.status_position();
         let position_w = if self.width >= 480.0 { (12.0 * self.char_w).min(room * 0.3) } else { 0.0 };
@@ -6625,6 +6626,7 @@ impl Render for ReaderView {
         let commands_hover = self.commands_hover;
         let activity_button = self.activity_button();
         let results_button = self.results_button();
+        let details_button = self.details_button();
         let restricted_button = self.restricted_button();
         let activity = self.activity_layout();
         let activity_height = self.activity_height();
@@ -6782,7 +6784,7 @@ impl Render for ReaderView {
                                 lenz_gpui::text(window, cx, m, bx + char_w, status_y + 2.0, label, palette.fg);
                             }
                         }
-                        for (b, label) in activity_button.iter().chain(&results_button) {
+                        for (b, label) in activity_button.iter().chain(&details_button).chain(&results_button) {
                             lenz_gpui::text(window, cx, m, x0 + f32::from(b.left()), y0 + f32::from(b.top()) + 2.0, label, palette.accent);
                         }
                         if let Some((b, label)) = &restricted_button {

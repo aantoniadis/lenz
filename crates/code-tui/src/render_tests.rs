@@ -890,7 +890,8 @@ fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
                 assert!(footer.starts_with(&format!(" {}", a.session.status_position())), "{footer}");
                 assert!(footer.contains('…'));
                 assert!(a.layout.panes[0].tabs.iter().all(|(_, rect)| rect.y == 1));
-                let (_, message) = a.layout.controls.iter().find(|(id, _)| *id == CommandId::StatusDetails).unwrap();
+                // The message's target, after the labelled Details item's.
+                let (_, message) = a.layout.controls.iter().rev().find(|(id, _)| *id == CommandId::StatusDetails).unwrap();
                 let shown: String = (message.x..message.right()).map(|x| buffer[(x, message.y)].symbol()).collect();
                 assert!(shown.contains('界'));
                 assert!(shown.contains("e\u{301}"));
@@ -1291,9 +1292,12 @@ fn status_bar_controls_cover_only_drawn_cells() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path(), false);
     open(&mut app, dir.path(), "notes.txt", b"one\ntwo\n");
-    draw(&mut app, 100, 20);
+    let buffer = draw(&mut app, 130, 20);
     assert_eq!(app.session.status_message(), "");
-    assert!(!app.layout.controls.iter().any(|(id, _)| *id == CommandId::StatusDetails));
+    // Status Details' only target is its labelled item, never the empty message.
+    let details: Vec<Rect> = app.layout.controls.iter().filter(|(id, _)| *id == CommandId::StatusDetails).map(|(_, r)| *r).collect();
+    assert_eq!(details.len(), 1, "{details:?}");
+    assert_eq!((details[0].x..details[0].right()).map(|x| buffer[(x, 19)].symbol()).collect::<String>(), "Details ");
     assert!(app.layout.controls.iter().any(|(id, r)| *id == CommandId::GoToLine && r.y == 19));
 }
 

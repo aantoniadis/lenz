@@ -801,15 +801,23 @@ impl App {
         let log_rect = Rect::new(commands_rect.x.saturating_sub(log_width), area.y, log_width, 1);
         line(frame.buffer_mut(), log_rect, &format!("Logs ({})", self.session.state().activity_log().len()), style(p.accent, p.status_bg));
         geometry.controls.push((CommandId::ToggleActivityLog, log_rect));
-        // "Results (4)" left of the log while the results panel is hidden; a click shows it again.
+        // "Details" left of the log: Status Details (Shift+F2), named where it can be found; narrow terminals keep the
+        // key and the menus.
+        let details_width = if area.width >= 120 { 8u16 } else { 0 };
+        let details_rect = Rect::new(log_rect.x.saturating_sub(details_width), area.y, details_width, 1);
+        if details_width > 0 {
+            line(frame.buffer_mut(), details_rect, "Details ", style(p.accent, p.status_bg));
+            geometry.controls.push((CommandId::StatusDetails, details_rect));
+        }
+        // "Results (4)" left of the details while the results panel is hidden; a click shows it again.
         let hidden = self.session.hidden_results_label().map(|label| format!("{label} ")).unwrap_or_default();
-        let results_width = (hidden.width() as u16).min(area.width.saturating_sub(commands_width + log_width) / 3);
-        let results_rect = Rect::new(log_rect.x.saturating_sub(results_width), area.y, results_width, 1);
+        let results_width = (hidden.width() as u16).min(area.width.saturating_sub(commands_width + log_width + details_width) / 3);
+        let results_rect = Rect::new(details_rect.x.saturating_sub(results_width), area.y, results_width, 1);
         if results_width > 0 {
             line(frame.buffer_mut(), results_rect, &code_core::chrome::ellipsize(&hidden, results_width as usize), style(p.accent, p.status_bg));
             geometry.controls.push((CommandId::ToggleResults, results_rect));
         }
-        let available = area.width.saturating_sub(commands_width + log_width + results_width);
+        let available = area.width.saturating_sub(commands_width + log_width + details_width + results_width);
         let state = self.session.state();
         let (server_label, server_action) = self.session.language_server_control();
         let lsp = format!(" {server_label} [F2] ");

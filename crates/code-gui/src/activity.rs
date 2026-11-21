@@ -20,11 +20,21 @@ impl ReaderView {
         let width = (if self.width < 640.0 { 6.0 } else { 10.0 } * self.char_w).min(right.max(0.0));
         Some((Bounds { origin: point(px(right - width), px(self.height - self.status_h())), size: size(px(width), px(self.status_h())) }, (if self.width < 640.0 { "Logs".into() } else { format!("Logs ({})", self.session.state().activity_log().len()) })))
     }
-    /// "Results (4)" left of the log button while the results panel is hidden; a click shows it again.
+    /// "Details" left of the log button: Status Details (Shift+F2), named where it can be found. Narrow windows keep
+    /// the key and the menus.
+    pub(super) fn details_button(&self) -> Option<(Bounds<Pixels>, String)> {
+        // The server label and the message keep the room in narrower windows.
+        if self.width < 760.0 { return None; }
+        let right = self.activity_button().map(|(b, _)| f32::from(b.left()) - STATUS_PAD)?;
+        let label = "Details".to_owned();
+        let width = ((lenz_content::wrap::width(&label) + 1) as f32 * self.char_w).min(right.max(0.0));
+        Some((Bounds { origin: point(px(right - width), px(self.height - self.status_h())), size: size(px(width), px(self.status_h())) }, label))
+    }
+    /// "Results (4)" left of the details button while the results panel is hidden; a click shows it again.
     pub(super) fn results_button(&self) -> Option<(Bounds<Pixels>, String)> {
         let label = self.session.hidden_results_label()?;
         let label = if self.width < 640.0 { "Results".to_owned() } else { label };
-        let right = self.activity_button().map(|(b, _)| f32::from(b.left()) - STATUS_PAD)?;
+        let right = self.details_button().or_else(|| self.activity_button()).map(|(b, _)| f32::from(b.left()) - STATUS_PAD)?;
         let width = ((lenz_content::wrap::width(&label) + 1) as f32 * self.char_w).min(right.max(0.0));
         Some((Bounds { origin: point(px(right - width), px(self.height - self.status_h())), size: size(px(width), px(self.status_h())) }, label))
     }
@@ -32,7 +42,7 @@ impl ReaderView {
     /// it); a click opens the folder-trust dialog.
     pub(super) fn restricted_button(&self) -> Option<(Bounds<Pixels>, String)> {
         let label = self.session.restricted_label()?;
-        let right = self.results_button().or_else(|| self.activity_button()).map(|(b, _)| f32::from(b.left()) - STATUS_PAD)?;
+        let right = self.results_button().or_else(|| self.details_button()).or_else(|| self.activity_button()).map(|(b, _)| f32::from(b.left()) - STATUS_PAD)?;
         // At most a quarter of the room left of it: it gives way before the footer's other cells.
         let width = ((lenz_content::wrap::width(label) + 1) as f32 * self.char_w).min((right / 4.0).max(0.0));
         Some((Bounds { origin: point(px(right - width), px(self.height - self.status_h())), size: size(px(width), px(self.status_h())) }, label.to_owned()))

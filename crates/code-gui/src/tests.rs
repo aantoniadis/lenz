@@ -6405,6 +6405,12 @@ fn status_bar_blank_space_is_no_control_and_the_position_goes_to_a_line(cx: &mut
     assert!(!position.1.is_empty());
     v.simulate_click(position.0.center(), Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::GoTo { .. }))));
+    v.simulate_keystrokes("escape");
+    // Status Details has a labelled item of its own.
+    let (details, label) = f.view.read_with(&v, |r, _| r.details_button()).unwrap();
+    assert_eq!(label, "Details");
+    v.simulate_click(details.center(), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
 }
 
 #[gpui::test]
