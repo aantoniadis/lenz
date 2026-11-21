@@ -147,6 +147,8 @@ pub const COMPLETIONS: usize = 64;
 pub const RECENT_ROOTS: usize = 10;
 /// How often idle language servers are checked and their memory sampled.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a load runs before the status bar names it: switching files loads for milliseconds.
+pub const LOADING_QUIET: std::time::Duration = std::time::Duration::from_millis(500);
 /// How long a symbol search waits for the slowest server it asked.
 pub const SYMBOLS_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1895,6 +1897,8 @@ pub struct State {
     focused: u8,
     history: History,
     loading: Option<PathBuf>,
+    /// When the current load began: the status bar names a load only once it is slow.
+    loading_since: Option<std::time::Instant>,
     /// Messages about failed actions and settings, newest last.
     messages: activity::Messages,
     palette: Arc<Palette>,
@@ -2670,6 +2674,11 @@ impl State {
     pub fn loading(&self) -> Option<&Path> {
         self.loading.as_deref()
     }
+    /// The file loading for at least [`LOADING_QUIET`] (`None`: none, or not yet).
+    pub fn slow_loading(&self) -> Option<&Path> {
+        let since = self.loading_since?;
+        self.loading.as_deref().filter(|_| self.semantics.now().duration_since(since) >= LOADING_QUIET)
+    }
     /// The active tab's selected source text (`None` for a caret or no selection).
     pub fn selected_text(&self) -> Option<String> {
         self.view(self.active?)?.copy_selection()
@@ -3068,6 +3077,8 @@ struct LayoutIntent {
 }
 
 pub struct Session {
+    /// Each tab's caret position as the status bar last drew it, kept while its text reloads.
+    pub(crate) shown_position: std::cell::RefCell<std::collections::HashMap<TabId, String>>,
     terminals: terminal_work::Terminals,
     text_input_enabled: bool,
     vim_group_edit: bool,
@@ -3352,6 +3363,7 @@ impl Session {
         let recovery_dir = config.cache.join("recovery");
         let recovery = crate::recovery::Recovery::open(recovery_dir.clone());
         Self {
+            shown_position: Default::default(),
             terminals: terminal_work::Terminals::default(),
             text_input_enabled,
             vim_group_edit: false,
@@ -3368,6 +3380,7 @@ impl Session {
                 focused: 0,
                 history: History::default(),
                 loading: None,
+                loading_since: None,
                 messages: messages.into(),
                 palette: themes.snapshot().palette,
                 project: None,
@@ -10009,7 +10022,7 @@ impl Session {
                     // Check the kept snapshot is current off the UI thread before reusing it.
                     let (request, tx) = (self.next_request(), self.tx.clone());
                     self.pending = Some((id, false));
-                    self.state.loading = Some(path.clone());
+                    self.start_loading(path.clone());
                     self.jobs.submit(Priority::Visible, move || {
                         let stamp = Stamp::of(&path);
                         let _ = tx.send_blocking(Completion::Checked { request, tab: id, path, stamp });
@@ -10571,6 +10584,17 @@ impl Session {
         });
     }
 
+    /// Note a load of `path`, and wake once [`LOADING_QUIET`] has passed, when a still running load gets named.
+    pub(crate) fn start_loading(&mut self, path: PathBuf) {
+        self.state.loading = Some(path);
+        self.state.loading_since = Some(self.state.semantics.now());
+        let tx = self.tx.clone();
+        let _ = std::thread::Builder::new().name("reader-loading".into()).spawn(move || {
+            std::thread::sleep(LOADING_QUIET);
+            let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Quiet));
+        });
+    }
+
     /// Read and decode tab `id`'s source off the UI thread; a load superseded before it starts reads nothing.
     fn load(&mut self, id: TabId, reload: bool) {
         let Some(path) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.source.clone()) else { return };
@@ -10578,7 +10602,7 @@ impl Session {
         let request = self.next_request();
         self.pending = Some((id, reload));
         self.reload_source = reload.then(|| self.state.source(id).map(|source| SemanticSource::new(source))).flatten();
-        self.state.loading = Some(path.clone());
+        self.start_loading(path.clone());
         let (latest, versions, tx) = (self.latest.clone(), self.versions.clone(), self.tx.clone());
         self.jobs.submit(Priority::Visible, move || {
             if latest.load(Ordering::Relaxed) != request {

@@ -2510,6 +2510,8 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestA
         session: 1,
         message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"ruby-index", "value":{"kind":"begin", "title":"Indexing Ruby files", "percentage":42}}}),
     }), cx));
+    assert_eq!(f.view.read_with(cx, |r, _| r.status_segments().0.1), "LSP ready", "a ready server's indexing is quiet at first");
+    std::thread::sleep(code_core::semantics::REINDEX_QUIET);
     let mut v = visual(cx, &f);
     for (w, h) in [(900.0, 500.0), (480.0, 300.0)] {
         v.simulate_resize(size(px(w), px(h)));

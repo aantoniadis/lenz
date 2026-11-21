@@ -67,7 +67,7 @@ impl Session {
         let path = self.state.tabs.iter().find(|tab| tab.id == id).map_or_else(|| location.to_uri(), |tab| tab.source.clone());
         self.pending = Some((id, reload));
         self.reload_source = reload.then(|| self.state.source(id).map(|source| SemanticSource::new(source))).flatten();
-        self.state.loading = Some(path.clone());
+        self.start_loading(path.clone());
         let (latest, versions, tx) = (self.latest.clone(), self.versions.clone(), self.tx.clone());
         self.jobs.submit(Priority::Visible, move || {
             let cancel = || latest.load(Ordering::Relaxed) != request;

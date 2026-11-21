@@ -124,6 +124,14 @@ impl Session {
         if let Some(asking) = state.asking() {
             return format!("{asking} (Escape cancels)");
         }
+        // Only a slow load is named (switching files loads for milliseconds), by its name, never its path.
+        if let Some(path) = state.slow_loading() {
+            let name = match crate::archive::Location::from_uri(path) {
+                Some(location) => location.member_name().map(|m| m.rsplit('/').next().unwrap_or(m).to_owned()),
+                None => path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            };
+            return format!("Loading {}…", name.unwrap_or_default());
+        }
         if let Some(notice) = state.notices().last() {
             return notice.clone();
         }
@@ -163,7 +171,6 @@ impl Session {
             return marker;
         }
         // The open file's name is on its tab; the status bar names it only in details.
-        // Nor while a switched-to file loads: that takes milliseconds, and a message for it would blink.
         if state.active().is_some() || state.current_source().is_some() { String::new() } else { "No file open — Ctrl+O file, F10 commands".into() }
     }
 
@@ -207,10 +214,16 @@ impl Session {
         {
             return format!("{}×{}", image.width, image.height);
         }
-        let position = match tab.selection().zip(self.state().view(tab.id()).map(|v| v.snapshot())) {
+        let view = self.state().view(tab.id());
+        let loading = view.is_none();
+        let position = match tab.selection().zip(view.map(|v| v.snapshot())) {
             Some((selection, document)) => {
-                format!("{}:{}", document.line_of(selection.head) + 1, document.column_at(selection.head) + 1)
+                let position = format!("{}:{}", document.line_of(selection.head) + 1, document.column_at(selection.head) + 1);
+                self.shown_position.borrow_mut().insert(tab.id(), position.clone());
+                position
             }
+            // Its text is loading (a switch or a reload, milliseconds): the caret as last drawn, not a blink.
+            None if loading && let Some(position) = self.shown_position.borrow().get(&tab.id()) => position.clone(),
             None => format!("Line {}", tab.top_line() + 1),
         };
         self.state().vim_status().map_or_else(|| position.clone(), |mode| format!("{mode}  {position}"))
@@ -336,6 +349,7 @@ mod tests {
             supports: vec![],
             error: None,
             environment: None,
+            quiet: false,
         };
         let before = provider_message(provider.clone());
         provider.memory = Some((150 << 20, 30 << 20));

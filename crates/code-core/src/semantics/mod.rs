@@ -261,6 +261,8 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// After initializing, a server without a readiness status (progress reports do not say the workspace is
 /// loaded) may still be loading it for about this long: its answers meanwhile are marked possibly incomplete.
 pub const UNREPORTED_WARMUP: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a ready server may index again (servers do briefly for each opened file) before the status bar says so.
+pub const REINDEX_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 /// Ticks (see `session::TICK`) questions wait for a sync barrier's answer before the text counts as applied.
 const SETTLE_TICKS: u8 = 2;
 /// Definition targets kept at most.
@@ -319,6 +321,8 @@ pub struct ProviderView {
     /// The project environment it analyses with (Pyright's Python environment), once checked at launch; `Err`: it
     /// was not started because that environment is missing (the reason is its status).
     pub environment: Option<Result<String, String>>,
+    /// Indexing again after being ready, for less than [`REINDEX_QUIET`]: the status bar still says ready.
+    pub quiet: bool,
 }
 
 impl ProviderView {
@@ -327,6 +331,7 @@ impl ProviderView {
         match &self.status {
             Status::Queued => "LSP waiting",
             Status::Starting => "LSP starting",
+            Status::Indexing(_) if self.quiet => "LSP ready",
             Status::Indexing(what) if !what.is_empty() => return format!("LSP indexing {what}"),
             Status::Indexing(_) => "LSP indexing",
             Status::Ready => "LSP ready",
@@ -433,6 +438,9 @@ pub enum Event {
     StartTimeout { session: u64 },
     /// Time passed: idle servers may stop.
     Tick,
+    /// A quiet moment passed ([`REINDEX_QUIET`] since a ready server started indexing again, or
+    /// [`crate::session::LOADING_QUIET`] since a load began): the status bar may say so now.
+    Quiet,
     /// Resident bytes per server session: the server's own, and its process group's other members'.
     Memory(Vec<(u64, u64, u64)>),
     /// Lenz's own check of a shell script finished ([`shell::Lint`]).
@@ -599,6 +607,8 @@ struct Server {
     idle_since: Option<std::time::Instant>,
     /// When it answered `initialize`.
     initialized_at: Option<std::time::Instant>,
+    /// Since when it has been indexing again after being ready.
+    reindexing: Option<std::time::Instant>,
     memory: Option<(u64, u64)>,
     /// The server's semantic token legend (empty without one).
     legend: Arc<Legend>,
@@ -831,7 +841,7 @@ impl Semantics {
         let language = language.or_else(|| crate::template::languages(path).first().copied())?;
         let (p, root) = self.resolved_language(language, path)?;
         let provider = &PROVIDERS[p];
-        let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new(), error: None, environment: None };
+        let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new(), error: None, environment: None, quiet: false };
         if large {
             return Some(view(None, Status::Missing("not used for large files".into())));
         }
@@ -846,14 +856,15 @@ impl Semantics {
             Some(None) => view(None, Status::Missing(provider.no_root.into())),
             Some(Some(root)) => match self.server(p, &root) {
                 None => view(Some(root), Status::Queued),
-                Some(s) => s.view(),
+                Some(s) => s.view((self.clock)()),
             },
         })
     }
 
     /// Every server this session runs or has tried to run, in launch order.
     pub fn views(&self) -> Vec<ProviderView> {
-        self.servers.iter().map(Server::view).collect()
+        let now = (self.clock)();
+        self.servers.iter().map(|s| s.view(now)).collect()
     }
 
     /// Workspace manifests changed: roots are resolved again for the next documents shown.
@@ -1027,6 +1038,7 @@ impl Semantics {
             held: true,
             idle_since: None,
             initialized_at: None,
+            reindexing: None,
             memory: None,
             legend: Default::default(),
             asked: Default::default(),
@@ -1742,12 +1754,21 @@ impl Semantics {
             }
             Event::Message { session, message } => {
                 let Some(s) = self.servers.iter_mut().find(|s| s.session == session) else { return Outcome::default() };
+                let quiet = s.reindexing.is_some();
                 let outcome = s.message(message, &self.settings, (self.clock)(), &mut self.notices);
                 s.touch((self.clock)());
+                if !quiet && s.reindexing.is_some() {
+                    let events = events.clone();
+                    let _ = std::thread::Builder::new().name("reader-quiet".into()).spawn(move || {
+                        std::thread::sleep(REINDEX_QUIET);
+                        let _ = events.send_blocking(Completion::Semantic(Event::Quiet));
+                    });
+                }
                 outcome
             }
             // The session handles ticks (expiry and sampling); nothing else sends them here.
             Event::Tick => Outcome::default(),
+            Event::Quiet => Outcome { repaint: true, ..Outcome::default() },
             Event::Memory(samples) => {
                 for (session, server, helpers) in samples {
                     if let Some(s) = self.servers.iter_mut().find(|s| s.session == session) {
@@ -1916,7 +1937,7 @@ fn same_document(a: &Document, b: &Document) -> bool {
 }
 
 impl Server {
-    fn view(&self) -> ProviderView {
+    fn view(&self, now: std::time::Instant) -> ProviderView {
         let p = &PROVIDERS[self.key.provider];
         ProviderView {
             name: p.name,
@@ -1931,6 +1952,7 @@ impl Server {
             supports: Question::ALL.into_iter().chain([Question::AutoInsert]).filter(|q| self.initialized() && self.supports(*q)).collect(),
             error: self.error.clone(),
             environment: self.environment.clone(),
+            quiet: self.reindexing.is_some_and(|t| now.duration_since(t) < REINDEX_QUIET),
         }
     }
 
@@ -2230,7 +2252,7 @@ impl Server {
                 });
                 Outcome::default()
             }
-            (Some(method), None) => self.notification(method, &m["params"], notices),
+            (Some(method), None) => self.notification(method, &m["params"], now, notices),
             (None, Some(id)) => {
                 let id = id.as_i64();
                 // Problems asked about one version: kept as a publication for exactly that text would be.
@@ -2281,7 +2303,7 @@ impl Server {
                     // A server that reports its own status is busy until it first says otherwise.
                     self.busy = PROVIDERS[self.key.provider].reports_status;
                     self.status = Status::Indexing(String::new());
-                    self.update_status();
+                    self.update_status(now);
                     return Outcome { repaint: true, ready: true, ..Outcome::default() };
                 }
                 let Some(lane) = self.pending.iter().find(|(_, pending)| Some(pending.id) == id).map(|(l, _)| *l) else { return Outcome::default() };
@@ -2300,7 +2322,7 @@ impl Server {
         }
     }
 
-    fn notification(&mut self, method: &str, params: &Value, notices: &mut Vec<String>) -> Outcome {
+    fn notification(&mut self, method: &str, params: &Value, now: std::time::Instant, notices: &mut Vec<String>) -> Outcome {
         match method {
             "$/progress" => {
                 let token = match &params["token"] {
@@ -2378,7 +2400,7 @@ impl Server {
             _ => return Outcome::default(),
         }
         let before = self.status.clone();
-        self.update_status();
+        self.update_status(now);
         if matches!(before, Status::Indexing(_)) && self.status == Status::Ready {
             // What was asked while loading may be empty (rust-analyzer) or refused (`ContentModified`): asked again
             // (the answer still to come is dropped).
@@ -2397,15 +2419,21 @@ impl Server {
 
     /// Initialization is not readiness: reported work in progress (or rust-analyzer's own status) keeps it
     /// indexing.
-    fn update_status(&mut self) {
+    fn update_status(&mut self, now: std::time::Instant) {
         if !self.initialized() {
             return;
         }
+        let was_ready = self.status == Status::Ready;
         self.status = match (self.progress.iter().min_by(|a, b| a.0.cmp(b.0)), self.busy) {
             (Some((_, w)), _) => Status::Indexing(w.summary()),
             (None, true) => Status::Indexing("loading the workspace".into()),
             (None, false) => Status::Ready,
         };
+        match &self.status {
+            Status::Indexing(_) if was_ready => self.reindexing = Some(now),
+            Status::Indexing(_) => {}
+            _ => self.reindexing = None,
+        }
     }
 
     fn stop(self) {

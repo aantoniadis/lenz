@@ -925,7 +925,10 @@ fn percentile(samples: &mut [f64], p: f64) -> f64 {
 
 #[test]
 fn indexing_progress_keeps_percentage_title_and_partial_reports() {
-    let mut f = fixture(&[], &[("src/main.rs", MAIN)]);
+    let now = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock = now.clone();
+    let mut f = fixture_with(&[], &[("src/main.rs", MAIN)], serde_json::json!({}), std::sync::Arc::new(move || *clock.lock().unwrap()));
+    let later = || *now.lock().unwrap() += code_core::semantics::REINDEX_QUIET;
     f.open("src/main.rs");
     f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
     let mut progress = |token: Value, value: Value| {
@@ -936,6 +939,12 @@ fn indexing_progress_keeps_percentage_title_and_partial_reports() {
         (f.s.state().language_server_label(), f.s.state().provider().unwrap().summary())
     };
     let (label, detail) = progress(serde_json::json!(7), serde_json::json!({"kind":"begin", "title":"Indexing Ruby files", "message":"app/models", "percentage":0}));
+    // A ready server indexing again stays "ready" in the bar for a moment (servers do so briefly for each opened
+    // file); the details say what it does.
+    assert_eq!(label, "LSP ready");
+    assert!(detail.contains("Indexing Ruby files") && detail.contains("app/models"), "{detail}");
+    later();
+    let (label, detail) = progress(serde_json::json!(7), serde_json::json!({"kind":"report", "percentage":0}));
     assert!(label.contains("0%"), "{label}");
     assert!(detail.contains("Indexing Ruby files") && detail.contains("app/models"), "{detail}");
     let (label, detail) = progress(serde_json::json!(7), serde_json::json!({"kind":"report", "percentage":42}));
@@ -953,6 +962,11 @@ fn indexing_progress_keeps_percentage_title_and_partial_reports() {
     let (label, _) = progress(serde_json::json!("other"), serde_json::json!({"kind":"end"}));
     assert_eq!(label, "LSP ready");
     let (label, _) = progress(serde_json::json!("next"), serde_json::json!({"kind":"begin", "title":"Loading gems"}));
+    assert_eq!(label, "LSP ready", "quiet again after being ready");
+    later();
+    // The wake a quiet start schedules redraws while it is still indexing.
+    assert!(f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Quiet)).repaint);
+    let label = f.s.state().language_server_label();
     assert!(label.contains("indexing") && !label.contains('%'), "{label}");
 }
 
@@ -963,6 +977,8 @@ fn status_follows_the_switched_to_tab_while_its_text_loads() {
     let mut f = fixture(&[], &[("src/main.rs", MAIN), ("src/lib.rs", "pub fn helper() {}\n"), ("notes.md", "# x\n"), ("q.sql", "select 1;\n")]);
     f.open("src/main.rs");
     f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
+    f.s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 2, column: Some(5) }));
+    assert_eq!(f.s.status_position(), "2:5");
     f.open("src/lib.rs");
     for (name, label, sql) in [("src/main.rs", "LSP ready", false), ("notes.md", "LSP unsupported", false), ("q.sql", "LSP unsupported", true)] {
         f.s.dispatch(Command::Open(f.root.join(name)));
@@ -970,10 +986,27 @@ fn status_follows_the_switched_to_tab_while_its_text_loads() {
         assert_eq!(f.s.state().language_server_label(), label, "{name}");
         assert_eq!(f.s.status_message(), "", "{name}");
         assert_eq!(f.s.state().sql_dialect_label().is_some(), sql, "{name}");
+        if name == "src/main.rs" { assert_eq!(f.s.status_position(), "2:5", "the caret as last drawn, not \"Line 1\""); }
         f.settle(|s| s.state().loading().is_none());
         assert_eq!(f.s.state().language_server_label(), label, "{name}: unchanged once loaded");
         assert_eq!(f.s.state().sql_dialect_label().is_some(), sql, "{name}");
     }
+}
+
+/// A load that is still running after a moment is named, by the file's name only; a quick one never is.
+#[test]
+fn only_a_slow_load_is_named_in_the_status_bar() {
+    let now = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock = now.clone();
+    let mut f = fixture_with(&[], &[("src/main.rs", MAIN), ("src/lib.rs", "pub fn helper() {}\n")], serde_json::json!({}), std::sync::Arc::new(move || *clock.lock().unwrap()));
+    f.open("src/main.rs");
+    f.s.dispatch(Command::Open(f.root.join("src/lib.rs")));
+    assert!(f.s.state().loading().is_some());
+    assert_eq!(f.s.status_message(), "");
+    *now.lock().unwrap() += code_core::session::LOADING_QUIET;
+    assert_eq!(f.s.status_message(), "Loading lib.rs…");
+    f.settle(|s| s.state().loading().is_none());
+    assert_eq!(f.s.status_message(), "");
 }
 
 /// An error the server logs or shows (Ruby LSP 0.26.11 logs a failed `initialized` and keeps running) is kept and

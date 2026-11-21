@@ -149,6 +149,8 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
     assert!(build.status().unwrap().success());
     let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
     for dark in [true, false] {
+        let now = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let clock = now.clone();
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
         std::fs::write(
@@ -168,7 +170,7 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
                 providers: base.join("providers.json"),
                 cache: base.join("cache"),
                 idle: code_core::semantics::IDLE,
-                clock: std::sync::Arc::new(std::time::Instant::now),
+                clock: std::sync::Arc::new(move || *clock.lock().unwrap()),
                 overrides: Default::default(),
                 dark,
             },
@@ -190,6 +192,8 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
                 session: 1,
                 message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"ruby-index", "value":{"kind":"begin", "title":"Indexing Ruby files", "percentage":42}}}),
             }));
+        // Past the moment a ready server's indexing stays quiet in the footer.
+        *now.lock().unwrap() += code_core::semantics::REINDEX_QUIET;
         for (width, height) in [(100, 30), (60, 15)] {
             assert!(text(&draw(&mut app, width, height)).contains("42%"));
             app.handle(crossterm::event::Event::Key(
