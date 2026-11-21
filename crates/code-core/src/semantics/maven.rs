@@ -41,10 +41,8 @@ pub(crate) fn profiles_in(text: &str) -> Vec<String> {
     let text = without_comments(text);
     let mut ids = Vec::new();
     let mut rest = text.as_str();
-    while let Some(at) = rest.find("<profiles>") {
-        rest = &rest[at + "<profiles>".len()..];
-        let end = rest.find("</profiles>").unwrap_or(rest.len());
-        let (section, after) = rest.split_at(end);
+    while let Some((_, opened)) = rest.split_once("<profiles>") {
+        let (section, after) = opened.split_once("</profiles>").unwrap_or((opened, ""));
         for profile in section.split("<profile>").skip(1) {
             let profile = profile.split("</profile>").next().unwrap_or_default();
             // The profile's own id: the sections that hold ids of their own (executions, repositories) go first.
@@ -73,10 +71,8 @@ pub(crate) fn profile_sources_in(text: &str) -> Vec<(String, Vec<String>)> {
     let text = without_comments(text);
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     let mut rest = text.as_str();
-    while let Some(at) = rest.find("<profiles>") {
-        rest = &rest[at + "<profiles>".len()..];
-        let end = rest.find("</profiles>").unwrap_or(rest.len());
-        let (section, after) = rest.split_at(end);
+    while let Some((_, opened)) = rest.split_once("<profiles>") {
+        let (section, after) = opened.split_once("</profiles>").unwrap_or((opened, ""));
         for profile in section.split("<profile>").skip(1) {
             let profile = profile.split("</profile>").next().unwrap_or_default();
             let own = without_sections(profile, &["build", "repositories", "pluginRepositories", "distributionManagement", "reporting"]);
@@ -107,9 +103,8 @@ fn without_sections(text: &str, tags: &[&str]) -> String {
     let mut text = text.to_owned();
     for tag in tags {
         let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
-        while let Some(at) = text.find(&open) {
-            let end = text[at..].find(&close).map_or(text.len(), |e| at + e + close.len());
-            text.replace_range(at..end, "");
+        while let Some((before, section)) = text.split_once(open.as_str()) {
+            text = format!("{before}{}", section.split_once(close.as_str()).map_or("", |(_, after)| after));
         }
     }
     text
@@ -118,9 +113,9 @@ fn without_sections(text: &str, tags: &[&str]) -> String {
 fn without_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(at) = rest.find("<!--") {
-        out.push_str(&rest[..at]);
-        rest = rest[at..].find("-->").map_or("", |end| &rest[at + end + 3..]);
+    while let Some((before, comment)) = rest.split_once("<!--") {
+        out.push_str(before);
+        rest = comment.split_once("-->").map_or("", |(_, after)| after);
     }
     out.push_str(rest);
     out
