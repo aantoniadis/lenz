@@ -124,9 +124,6 @@ impl Session {
         if let Some(asking) = state.asking() {
             return format!("{asking} (Escape cancels)");
         }
-        if let Some(path) = state.loading() {
-            return format!("Loading {}…", crate::archive::Location::from_uri(path).map_or_else(|| path.display().to_string(), |location| location.display_path()));
-        }
         if let Some(notice) = state.notices().last() {
             return notice.clone();
         }
@@ -166,7 +163,8 @@ impl Session {
             return marker;
         }
         // The open file's name is on its tab; the status bar names it only in details.
-        if state.current_source().is_some() { String::new() } else { "No file open — Ctrl+O file, F10 commands".into() }
+        // Nor while a switched-to file loads: that takes milliseconds, and a message for it would blink.
+        if state.active().is_some() || state.current_source().is_some() { String::new() } else { "No file open — Ctrl+O file, F10 commands".into() }
     }
 
     /// The live snippet's placeholder and what the keys do now, while Tab visits its placeholders rather than

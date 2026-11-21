@@ -824,16 +824,21 @@ impl Semantics {
     }
     pub(crate) fn view_source(&self, source: &crate::document::SourceMeta, large: bool) -> Option<ProviderView> {
         if source.archive().is_some() { return None; }
-        let (p, root) = self.resolved_source(source)?;
+        self.view_at(source.source(), source.language(), large)
+    }
+    /// As [`Self::view_source`], from a file's path and language: a tab whose text is still loading.
+    pub(crate) fn view_at(&self, path: &Path, language: Option<lenz_content::highlight::Language>, large: bool) -> Option<ProviderView> {
+        let language = language.or_else(|| crate::template::languages(path).first().copied())?;
+        let (p, root) = self.resolved_language(language, path)?;
         let provider = &PROVIDERS[p];
         let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new(), error: None, environment: None };
         if large {
             return Some(view(None, Status::Missing("not used for large files".into())));
         }
-        if self.disabled_for(p, source.source()) {
+        if self.disabled_for(p, path) {
             return Some(view(None, Status::Disabled));
         }
-        if let Some(why) = self.unmapped.get(source.source()) {
+        if let Some(why) = self.unmapped.get(path) {
             return Some(view(None, Status::Missing(format!("{UNMAPPED_TEMPLATE}: {why}"))));
         }
         Some(match root {

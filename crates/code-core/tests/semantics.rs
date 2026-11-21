@@ -956,6 +956,26 @@ fn indexing_progress_keeps_percentage_title_and_partial_reports() {
     assert!(label.contains("indexing") && !label.contains('%'), "{label}");
 }
 
+/// Switching files loads the text off the UI thread for a few milliseconds. Meanwhile the status bar already
+/// shows the new tab's server and SQL state and no message, so it does not blink "LSP no file" or a path.
+#[test]
+fn status_follows_the_switched_to_tab_while_its_text_loads() {
+    let mut f = fixture(&[], &[("src/main.rs", MAIN), ("src/lib.rs", "pub fn helper() {}\n"), ("notes.md", "# x\n"), ("q.sql", "select 1;\n")]);
+    f.open("src/main.rs");
+    f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
+    f.open("src/lib.rs");
+    for (name, label, sql) in [("src/main.rs", "LSP ready", false), ("notes.md", "LSP unsupported", false), ("q.sql", "LSP unsupported", true)] {
+        f.s.dispatch(Command::Open(f.root.join(name)));
+        assert!(f.s.state().loading().is_some(), "{name}: checked before its text arrives");
+        assert_eq!(f.s.state().language_server_label(), label, "{name}");
+        assert_eq!(f.s.status_message(), "", "{name}");
+        assert_eq!(f.s.state().sql_dialect_label().is_some(), sql, "{name}");
+        f.settle(|s| s.state().loading().is_none());
+        assert_eq!(f.s.state().language_server_label(), label, "{name}: unchanged once loaded");
+        assert_eq!(f.s.state().sql_dialect_label().is_some(), sql, "{name}");
+    }
+}
+
 /// An error the server logs or shows (Ruby LSP 0.26.11 logs a failed `initialized` and keeps running) is kept and
 /// shown, without stopping the server; other log levels are not.
 #[test]

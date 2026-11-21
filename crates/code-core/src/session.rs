@@ -2738,10 +2738,21 @@ impl State {
     /// The semantic provider for the active document and what it is doing; `None` when its language has none.
     pub fn provider(&self) -> Option<ProviderView> {
         // Source a language server returned is not a document any server holds.
-        if !self.active()?.is_file() {
+        let tab = self.active()?;
+        if !tab.is_file() {
             return None;
         }
-        self.semantics.view_source(self.current_source()?.source_meta(), self.current_source()?.is_large())
+        match self.current_source() {
+            Some(d) => self.semantics.view_source(d.source_meta(), d.is_large()),
+            // Its text is still loading (a few milliseconds when switching files): from its path, so the status
+            // bar does not blink.
+            None if crate::archive::Location::from_uri(&tab.source).is_none() => self.semantics.view_at(&tab.source, Self::tab_language(tab), false),
+            None => None,
+        }
+    }
+    /// A tab's language as last loaded, else as its path suggests.
+    fn tab_language(tab: &Tab) -> Option<Language> {
+        tab.language.unwrap_or_else(|| highlight::detect(&tab.source, ""))
     }
     /// The branches starred in this repository's Git Branches popup, by full name.
     pub fn favorite_branches(&self) -> std::collections::BTreeSet<String> {
@@ -2765,7 +2776,8 @@ impl State {
     }
     /// The active SQL file's dialect for a status bar (`None`: the file is not SQL). An unset dialect stays visible.
     pub fn sql_dialect_label(&self) -> Option<String> {
-        if self.current_source()?.language() != Some(Language::Sql) { return None; }
+        let language = match self.current_source() { Some(d) => d.language(), None => Self::tab_language(self.active()?) };
+        if language != Some(Language::Sql) { return None; }
         self.sql_dialect().map(|s| format!("SQL: {}", s.status()))
     }
     /// This file's own choice (`None`: it follows the project default).
@@ -2779,7 +2791,8 @@ impl State {
     }
     /// Compact status shown before paths and other notices so setup failures remain visible.
     pub fn language_server_label(&self) -> String {
-        self.provider().map_or_else(|| if self.current_source().is_some() { "LSP unsupported" } else { "LSP no file" }.to_owned(), |v| v.status_label())
+        let open = self.current_source().is_some() || self.active().is_some_and(Tab::is_file);
+        self.provider().map_or_else(|| if open { "LSP unsupported" } else { "LSP no file" }.to_owned(), |v| v.status_label())
     }
     pub fn server_install(&self) -> Option<&semantics::installer::Install> { self.server_install.as_ref() }
     pub fn server_runtime(&self) -> Option<&semantics::runtime::Runtime> { self.server_runtime.as_ref() }
