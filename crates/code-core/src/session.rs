@@ -8340,7 +8340,6 @@ impl Session {
         if found.is_empty() {
             if targets.unavailable.is_empty() && targets.failed.is_empty() {
                 let note = if indexing { " (it may still be loading or indexing its workspace; try again shortly)" } else { "" };
-                let limits = semantics::provider::PROVIDERS.iter().find(|p| p.name == provider).map_or(String::new(), |p| format!(". Known limits: {}", p.limits));
                 let what = match ask {
                     Ask::Usages => "no usages",
                     Ask::FileSymbols => "no symbols in this file",
@@ -8348,7 +8347,8 @@ impl Session {
                     Ask::TypeDefinition => "no type definition here",
                     _ => "no definition here",
                 };
-                self.state.messages.push(format!("{label}: {provider} found {what}{note}{limits}"));
+                // Its known limits are in Server Details (F2), not repeated in every such notice.
+                self.state.messages.push(format!("{label}: {provider} found {what}{note}"));
             }
             return Effect { repaint: true, copy: None, ..Effect::default() };
         }

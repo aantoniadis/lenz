@@ -5628,6 +5628,17 @@ impl ReaderView {
             }
             return lines;
         }
+        if let Some(Modal::ServerRuntime { path, .. }) = &self.modal {
+            // As the branch list: the name on the left, its path right-aligned and dim (giving up its start).
+            let mut lines = vec![(0, format!("› {path}"), false), (1, String::new(), false)];
+            let model = self.session.state().server_runtime();
+            for (i, (name, detail, _)) in model.map(|m| m.choices(path)).unwrap_or_default().into_iter().enumerate() {
+                lines.push((i + FINDER_HEADER_ROWS, fit_runtime(&name, detail.as_deref().unwrap_or_default(), cols.saturating_sub(1)).0, false));
+            }
+            // The note under the runtimes, never selected (the full layout shows it in its footer instead).
+            lines.extend(model.map(|m| wrap(&m.message, cols)).unwrap_or_default().into_iter().filter(|l| !l.trim().is_empty()).map(|line| (usize::MAX, line, true)));
+            return lines;
+        }
         let shortcuts = self.modal_shortcuts();
         let actions = matches!(self.modal, Some(Modal::Commands { .. } | Modal::AppMenu { .. } | Modal::CommandGroup { .. } | Modal::LanguageServer { .. }));
         // A command menu draws a setting's state as a check mark in its own two-cell column.
@@ -5747,6 +5758,41 @@ impl ReaderView {
             let shortcuts = branch_rows.iter().enumerate().filter_map(|(i, r)| { let detail = code_core::branches::fit_row(r, cols.saturating_sub(1)).1; (!detail.is_empty()).then_some((i + FINDER_HEADER_ROWS, detail)) }).collect();
             return Some(ModalLayout { bounds, lines, first, visible, at, footer, heading: Some(heading), query: Some(query.clone()), body_top, shortcuts, marks: Vec::new() });
         }
+        // A window too short for the heading, the field and three runtimes keeps the compact list below.
+        if let Some(Modal::ServerRuntime { path, .. }) = &self.modal
+            && ((self.height - 16.0).clamp(0.0, 540.0) - 2.0 * line_h() - 60.0) / line_h() >= 3.0
+        {
+            let model = self.session.state().server_runtime();
+            let heading = model.map_or_else(|| "Language server runtime".to_owned(), |m| m.title());
+            lines.retain(|(row, ..)| (FINDER_HEADER_ROWS..usize::MAX).contains(row));
+            let body_top = 2.0 * line_h() + 40.0;
+            let cap = (self.height - 16.0).clamp(0.0, 540.0);
+            let cols = self.columns(mw - 24.0);
+            let choices = model.map(|m| m.choices(path)).unwrap_or_default();
+            let fit = |(name, detail, _): &(String, Option<String>, Option<std::path::PathBuf>)| fit_runtime(name, detail.as_deref().unwrap_or_default(), cols.saturating_sub(1));
+            // The model's note (searching, none found, an error) first; else the highlighted runtime's executable.
+            let chosen = choices.get(at.saturating_sub(FINDER_HEADER_ROWS)).and_then(|(_, _, path)| path.as_ref())
+                .map(|p| code_core::branches::middle_ellipsis(&code_core::semantics::runtime::shown_path(p), cols));
+            let hint = match model.map(|m| m.message.as_str()).filter(|m| !m.is_empty()) {
+                Some(message) => message.to_owned(),
+                None => format!("{}Enter: use and restart · Esc: close", chosen.map_or(String::new(), |p| format!("{p}\n"))),
+            };
+            let available = ((cap - body_top - 20.0).max(0.0) / line_h()).floor() as usize;
+            let footer_cap = available.saturating_sub(1).min(3);
+            let mut footer: Vec<String> = hint.lines().flat_map(|line| wrap(line, cols)).collect();
+            if footer.len() > footer_cap {
+                footer.truncate(footer_cap);
+                if let Some(last) = footer.last_mut() { last.pop(); last.push('…'); }
+            }
+            let visible = available.saturating_sub(footer.len()).min(lines.len());
+            let start = lines.iter().position(|(i, _, _)| *i == at).unwrap_or(0);
+            let end = lines.iter().rposition(|(i, _, _)| *i == at).map_or(0, |i| i + 1);
+            let first = self.modal_first(at, start..end, lines.len(), visible);
+            let h = (body_top + (visible + footer.len()) as f32 * line_h() + 20.0).min(cap);
+            let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
+            let shortcuts = choices.iter().enumerate().filter_map(|(i, c)| { let detail = fit(c).1; (!detail.is_empty()).then_some((i + FINDER_HEADER_ROWS, detail)) }).collect();
+            return Some(ModalLayout { bounds, lines, first, visible, at, footer, heading: Some(heading), query: Some(path.clone()), body_top, shortcuts, marks: Vec::new() });
+        }
         if matches!(self.modal, Some(Modal::Themes { .. })) {
             let h = (self.height - 16.0).clamp(0.0, 400.0);
             let visible = (((h - 8.0).max(0.0) / line_h()).floor() as usize).min(lines.len());
@@ -5823,13 +5869,9 @@ impl ReaderView {
             Some(Modal::Navigation { .. }) => self.navigation_rows(),
             Some(Modal::ServerRuntime { path, .. }) => {
                 let model = self.session.state().server_runtime();
-                let mut rows = vec![(format!("{} › {path}", model.map_or("Server runtime executable / install folder", |m| m.kind.input_label())), None),
-                    (format!("{} · Enter restarts it", model.map_or_else(|| "Language server runtime".to_owned(), |m| m.title())), None)];
+                let mut rows = vec![(format!("{} › {path}", model.map_or("Server runtime executable / install folder", |m| m.kind.input_label())), None), (String::new(), None)];
                 if let Some(model) = model {
-                    // The name, then its path in a column of its own.
-                    let name_w = model.choices(path).iter().map(|(name, ..)| name.chars().count()).max().unwrap_or(0) + 3;
-                    rows.extend(model.choices(path).into_iter().map(|(name, detail, _)| (match detail { Some(d) => format!("{name:<name_w$}{d}"), None => name }, self.session.disabled(CommandId::ServerRuntime))));
-                    rows.extend(wrap(&model.message, self.columns(menu_width(self.width) - 24.0)).into_iter().filter(|l| !l.trim().is_empty()).map(|line| (line, None)));
+                    rows.extend(model.choices(path).into_iter().map(|(name, _, _)| (name, self.session.disabled(CommandId::ServerRuntime))));
                 }
                 rows
             }
@@ -7417,6 +7459,26 @@ fn paint_symbol(window: &mut Window, id: CommandId, cx: f32, cy: f32, shown: boo
             }
         }
     }
+}
+
+/// A runtime row in `cols` cells: its name (cut in the middle past three fifths of the row), and where it lives in
+/// the room left (under half the row, where a list draws a detail), giving up its start. The location goes when
+/// under eight cells remain.
+fn fit_runtime(name: &str, path: &str, cols: usize) -> (String, String) {
+    use lenz_content::wrap::width;
+    let name = code_core::branches::middle_ellipsis(name, (cols * 3 / 5).max(1));
+    let room = cols.saturating_sub(width(&name) + 3).min((cols / 2).saturating_sub(4));
+    let path = if room < 8 || path.is_empty() { String::new() } else if width(path) <= room { path.to_owned() } else {
+        let (mut tail, mut used) = (Vec::new(), 0);
+        for c in path.chars().rev() {
+            let w = width(c.encode_utf8(&mut [0; 4]));
+            if used + w > room - 1 { break; }
+            tail.push(c);
+            used += w;
+        }
+        std::iter::once('…').chain(tail.into_iter().rev()).collect()
+    };
+    (name, path)
 }
 
 /// How long a Copy button says "Copied" after copying.

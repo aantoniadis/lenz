@@ -683,6 +683,23 @@ fn edits_are_declined_and_initialization_is_not_readiness() {
     assert!(f.notice("it may still be loading or indexing its workspace"), "{:?}", f.s.state().notices());
 }
 
+/// A ready server indexing for a moment around a request (jdtls validates documents) is not still loading: an
+/// empty answer says only that nothing was found.
+#[test]
+fn a_ready_servers_brief_indexing_is_not_reported_as_loading() {
+    let mut f = fixture(&[], &[("src/lib.rs", LIB), ("src/main.rs", MAIN)]);
+    f.open("src/main.rs");
+    f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
+    f.s.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"validate", "value":{"kind":"begin", "title":"Validate documents"}}}),
+    }));
+    f.definition("nothing_here", false);
+    f.asked();
+    assert!(f.notice("found no definition here"), "{:?}", f.s.state().notices());
+    assert!(!f.notice("may still be loading"), "{:?}", f.s.state().notices());
+}
+
 #[test]
 fn a_failed_version_probe_keeps_the_recovery_hint() {
     let mut f = fixture(&[("FAKE_LSP_VERSION_FAIL", "mise")], &[("src/main.rs", MAIN)]);
@@ -1227,7 +1244,8 @@ fn usages_list_semantic_references_with_their_provenance() {
     f.caret("lonely");
     f.s.dispatch(Command::Usages);
     f.asked();
-    assert!(f.notice("Usages: rust-analyzer found no usages. Known limits:"), "{:?}", f.s.state().notices());
+    assert!(f.notice("Usages: rust-analyzer found no usages"), "{:?}", f.s.state().notices());
+    assert!(!f.s.state().notices().iter().any(|n| n.contains("Known limits")), "the limits stay in Server Details");
     // Unsupported by the server: not an empty success.
     let mut g = fixture(&[("FAKE_LSP_NO_REFERENCES", "1")], &[("src/main.rs", USES)]);
     g.open("src/main.rs");

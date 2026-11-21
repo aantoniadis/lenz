@@ -2315,7 +2315,9 @@ impl Server {
                 };
                 // Still indexing, or (for a server that never says) just started.
                 let no_status = !PROVIDERS[self.key.provider].reports_status;
-                let indexing = matches!(self.status, Status::Indexing(_)) || no_status && self.initialized_at.is_some_and(|t| now.duration_since(t) < UNREPORTED_WARMUP);
+                // A ready server's brief indexing (jdtls validates documents around requests) is not loading.
+                let brief = self.reindexing.is_some_and(|t| now.duration_since(t) < REINDEX_QUIET);
+                let indexing = matches!(self.status, Status::Indexing(_)) && !brief || no_status && self.initialized_at.is_some_and(|t| now.duration_since(t) < UNREPORTED_WARMUP);
                 Outcome { repaint: true, replies: vec![Reply { lane, request, session: self.session, encoding: self.encoding, provider: name, result, indexing, sources }], ready: false, ..Outcome::default() }
             }
             (None, None) => Outcome::default(),

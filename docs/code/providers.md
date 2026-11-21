@@ -581,7 +581,8 @@ Ticket 57: the routing seam templates are served through. The table records tick
 ## Repairing a Java server runtime in the reader
 
 In either frontend, open a Java file, press **F2** (Language Server Status), then choose **Choose Language Server Runtime…**.
-Each detected Java is listed by its install folder and path, the one in use marked **in use**. Select one, or
+Each detected Java is listed by its install folder and the folder it is in, the one in use marked **in use**; the
+highlighted one's full path shows below the list. Select one, or
 enter/paste an executable path or JDK home folder and choose **Use the entered path**; Enter restarts the server
 with it. Lenz runs `java -version` with a three-second timeout, saves the JDT LS `--java-executable`
 argument in `providers.json`, and restarts enabled Java servers. Other provider settings and disabled states are
