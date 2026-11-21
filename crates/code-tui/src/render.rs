@@ -1690,16 +1690,22 @@ impl App {
                 .min(wrapped.len().saturating_sub(content.height as usize));
             for (n, text) in wrapped
                 .iter()
+                .enumerate()
                 .skip(modal.top)
                 .take(content.height as usize)
-                .enumerate()
             {
-                line(
-                    frame.buffer_mut(),
-                    row(content, n as u16),
-                    text,
-                    style(p.fg, p.status_bg).add_modifier(if text.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`')) { Modifier::BOLD } else { Modifier::empty() }),
-                );
+                // As in the GUI: a section heading bold, a label dimmer than its value.
+                let at = row(content, (n - modal.top) as u16);
+                match code_core::chrome::detail_line(n.checked_sub(1).map(|i| wrapped[i].as_str()), text) {
+                    code_core::chrome::DetailLine::Heading => line(frame.buffer_mut(), at, text, style(p.fg, p.status_bg).add_modifier(Modifier::BOLD)),
+                    code_core::chrome::DetailLine::Labelled(end) => {
+                        let (label, value) = text.split_at(end.min(text.len()));
+                        let width = (label.width() as u16).min(at.width);
+                        line(frame.buffer_mut(), Rect { width, ..at }, label, style(p.dim, p.status_bg));
+                        line(frame.buffer_mut(), Rect { x: at.x + width, width: at.width - width, ..at }, value, style(p.fg, p.status_bg));
+                    }
+                    code_core::chrome::DetailLine::Plain => line(frame.buffer_mut(), at, text, style(p.fg, p.status_bg)),
+                }
             }
             return;
         }
@@ -1758,6 +1764,7 @@ impl App {
         let menu_marks = matches!(modal.kind, Prompt::Menu(_) | Prompt::LanguageServer) && choices.iter().any(|c| code_core::chrome::toggle_split(&c.label).1.is_some());
         modal.at = modal.at.min(choices.len().saturating_sub(1));
         let mut previous_section = None;
+        let headings = if modal.kind == Prompt::LanguageServer { self.session.language_server_headings() } else { Vec::new() };
         for (i, choice) in choices.iter().enumerate() {
             if choice.section != previous_section {
                 if let Some(section) = choice.section {
@@ -1780,8 +1787,8 @@ impl App {
                 rendered.push((i, format!("{marker}{name}{}{detail}", " ".repeat(pad)), false));
                 continue;
             }
-            if modal.kind == Prompt::LanguageServer && matches!(i, 4 | 8) {
-                rendered.push((usize::MAX, if i == 4 { "Setup" } else { "Indexing" }.to_string(), true));
+            if modal.kind == Prompt::LanguageServer && let Some((_, title)) = headings.iter().find(|(at, _)| *at == i) {
+                rendered.push((usize::MAX, title.to_string(), true));
             }
             if separators.contains(&i) {
                 rendered.push((usize::MAX, "─".repeat(width), true));

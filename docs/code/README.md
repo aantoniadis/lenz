@@ -432,9 +432,11 @@ the server's ranking. Their documentation renders Markdown and syntax-highlighte
 of a short truncated excerpt. Wheel over the documentation, or use Alt+PageUp/PageDown/Home/End, to read it;
 changing the selected suggestion starts its documentation at the top.
 The toolbar keeps navigation and the branch selector above the tabs, with a visible app menu. Find and comparison actions live in their menus and shortcuts.
-The footer separates language-server status, the current message, cursor position and Commands.
-Long messages end with an ellipsis; click the message or use **Status details…** (Shift+F2)
-for a wrapped, scrollable snapshot. Ctrl+C copies the complete snapshot. Routine server-memory
+The footer separates language-server status, the current message, cursor position and Commands; only a cell that
+shows something is a control (the position opens Go to Line). Long messages end with an ellipsis; click the message
+or use **Status details…** (Shift+F2) for a wrapped, scrollable snapshot: what needs attention first, then **File**,
+**Project** and **Language server**, one labelled line each (the home folder shown as `~`). Ctrl+C copies the
+complete snapshot; a Copy button says "Copied" when it has. Routine server-memory
 samples stay in details so they do not continually change the footer.
 
 Click the LSP footer status or press F2

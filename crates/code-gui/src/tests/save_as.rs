@@ -93,7 +93,7 @@ fn gui_new_file_and_save_as_use_real_keys_dialogs_and_the_core_replace_decision(
     draw(&mut v);
     assert_eq!(text(&v, &f), "draft λ\n");
     assert!(f.view.read_with(&v, |view, _| view.tab_hits.iter().any(|h| h.2 == tab)));
-    assert!(f.view.read_with(&v, |view, _| view.status().starts_with("Untitled-1")), "{}", f.view.read_with(&v, |view, _| view.status()));
+    assert!(f.view.read_with(&v, |view, _| view.status().contains("Name: Untitled-1")), "{}", f.view.read_with(&v, |view, _| view.status()));
     // Plain Save asks in the same window; Escape leaves the untitled draft untouched.
     v.simulate_keystrokes("ctrl-s");
     assert!(!cx.did_prompt_for_new_path());

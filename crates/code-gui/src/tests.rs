@@ -902,7 +902,7 @@ fn an_empty_window_renders_and_its_menu_explains_disabled_commands(cx: &mut Test
     let f = fixture(cx, None);
     let mut v = visual(cx, &f);
     draw(&mut v);
-    assert!(f.view.read_with(&v, |v, _| v.status()).starts_with("No file open"));
+    assert!(f.view.read_with(&v, |v, _| v.status()).contains("Name: none open"), "{}", f.view.read_with(&v, |v, _| v.status()));
     v.simulate_keystrokes("f10");
     let rows = f.view.read_with(&v, |v, _| v.modal_rows());
     let reload = rows.iter().position(|r| r.0 == "Reload").unwrap();
@@ -1740,7 +1740,7 @@ fn the_tree_and_finder_open_files_by_mouse_and_keyboard(cx: &mut TestAppContext)
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
-    assert!(f.view.read_with(&v, |v, _| v.status()).contains("proj: 5 files"), "hidden files kept, ignored ones not");
+    assert!(f.view.read_with(&v, |v, _| v.status()).contains("Files: 5\n"), "hidden files kept, ignored ones not: {}", f.view.read_with(&v, |v, _| v.status()));
     // Click the "src" arrow (folders first), then the file inside it.
     let body = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
     let row_y = |i: f32| body.origin.y + px(i * line_h() + line_h() / 2.0);
@@ -1781,7 +1781,7 @@ fn folders_open_through_the_command_menu_recent_list_and_narrow_windows(cx: &mut
     let missing = f.dir.path().join("gone");
     f.view.update(cx, |v, cx| v.open_root(missing.clone(), cx));
     settle(cx, &f, scanned);
-    assert!(f.view.read_with(cx, |v, _| v.status()).contains("gone: unavailable"));
+    assert!(f.view.read_with(cx, |v, _| v.status()).contains("Files: unavailable"), "{}", f.view.read_with(cx, |v, _| v.status()));
     f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
     settle(cx, &f, scanned);
     let mut v = visual(cx, &f);

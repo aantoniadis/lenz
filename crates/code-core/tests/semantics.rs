@@ -1054,11 +1054,11 @@ fn status_details_lists_each_notice_and_the_server_once() {
     f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
     f.s.dispatch(Command::Notice("Definition: no definition here".into()));
     let details = f.s.status_details();
-    let paragraphs: Vec<&str> = details.split("\n\n").collect();
-    let summary = f.s.state().provider().unwrap().summary();
-    assert_eq!(paragraphs.iter().filter(|p| **p == summary).count(), 1, "{details}");
-    assert_eq!(paragraphs.iter().filter(|p| **p == "Definition: no definition here").count(), 1, "{details}");
-    assert_eq!(paragraphs.first(), Some(&"Definition: no definition here"));
+    let lines: Vec<&str> = details.lines().collect();
+    let summary = format!("Server: {}", f.s.state().provider().unwrap().summary());
+    assert_eq!(lines.iter().filter(|l| **l == summary).count(), 1, "{details}");
+    assert_eq!(lines.iter().filter(|l| **l == "Definition: no definition here").count(), 1, "{details}");
+    assert_eq!(lines.first(), Some(&"Definition: no definition here"), "what needs attention first");
     // Server Details on its own still ends with the notice.
     assert!(f.s.language_server_details().ends_with("Definition: no definition here"));
 }
@@ -4628,7 +4628,7 @@ fn pyright_names_its_configured_environment_and_a_missing_one_stops_it_while_edi
     let expected = format!("Python environment: {} (venv \"env\" with venvPath \".\" in {}), Python 3.13.5; installed packages from {}", env.display(), f.root.join("pyrightconfig.json").display(), env.join("lib/python3.13/site-packages").display());
     assert_eq!(f.s.state().provider().unwrap().environment, Some(Ok(expected.clone())));
     let details = f.s.language_server_details();
-    assert!(details.contains(&format!("Workspace: {}\n\n{expected}\n\n", f.root.display())), "{details}");
+    assert!(details.contains(&format!("Workspace: {}\n{expected}\n", f.root.display())), "{details}");
     // The configured environment goes away: a restart refuses to start Pyright with another one.
     std::fs::rename(&env, f.root.join("moved")).unwrap();
     let starts = messages(&f.log).iter().filter(|m| m["method"] == "initialize").count();
@@ -4638,8 +4638,8 @@ fn pyright_names_its_configured_environment_and_a_missing_one_stops_it_while_edi
     assert_eq!(f.s.state().provider().unwrap().status, Status::Failed(why.clone()));
     assert_eq!(f.s.state().provider().unwrap().status_label(), "LSP stopped");
     let details = f.s.language_server_details();
-    assert!(details.starts_with(&format!("Pyright: stopped: {why}\n\n")), "{details}");
-    assert!(details.contains("\n\nThe language server was not started: correct the project environment named above, then choose Restart Language Server. Lenz never creates environments or installs packages.\n\n"), "{details}");
+    assert!(details.starts_with(&format!("Server: Pyright: stopped: {why}\n")), "{details}");
+    assert!(details.contains("\nHelp: The language server was not started: correct the project environment named above, then choose Restart Language Server. Lenz never creates environments or installs packages.\n"), "{details}");
     assert!(!details.contains("Setup: ") && !details.contains("runtime selection"), "nothing suggests reinstalling Pyright: {details}");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "initialize").count(), starts, "no server was started");
@@ -4715,7 +4715,7 @@ fn python_format_and_organize_imports_run_the_projects_ruff_from_its_environment
     assert!(f.s.editing_preferences_details().lines().any(|l| l == formatter), "{}", f.s.editing_preferences_details());
     let details = f.s.language_server_details();
     let row = format!("Format Document and Organize Imports run the project's formatter, not the language server: ruff (configured by {}); executable {}", f.root.join("pyproject.toml").display(), f.root.join("env/bin/ruff").display());
-    assert!(details.split("\n\n").any(|r| r == row), "{details}");
+    assert!(details.lines().any(|r| r == row), "{details}");
     // Format on save formats with ruff, then writes; the other file stays as it is.
     f.s.dispatch(Command::SetFormatOnSave(true));
     assert!(f.s.editing_preferences_details().contains("Format on save: on for this project (Save runs the project's formatter first)"));
@@ -5056,7 +5056,7 @@ fn erb_templates_format_with_the_projects_erb_lint_as_one_undo_step_and_say_when
     f.s.dispatch(Command::Undo { tab });
     assert_eq!(current_text(f.s.state()), ERB_FORMAT, "one Undo takes it back");
     let row = format!("Format Document runs the project's erb_lint, not a language server: erb_lint (configured by {}); run as {} with --autocorrect", f.root.join(".erb_lint.yml").display(), f.root.join("bin/erb_lint").display());
-    assert!(f.s.language_server_details().split("\n\n").any(|r| r == row), "{}", f.s.language_server_details());
+    assert!(f.s.language_server_details().lines().any(|r| r == row), "{}", f.s.language_server_details());
     assert!(f.s.editing_preferences_details().lines().any(|l| l == format!("Formatter: {}", row.split_once(": ").unwrap().1)), "{}", f.s.editing_preferences_details());
     // A result for text that has changed since is refused.
     f.open("app/views/posts/slow.html.erb");

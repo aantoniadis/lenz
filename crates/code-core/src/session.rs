@@ -4121,6 +4121,15 @@ impl Session {
         rows
     }
 
+    /// Where the server menu's sections start in [`Self::language_server_rows`]: Setup at enabling or disabling the
+    /// server, Indexing at the Ruby tooling exclusions (rows offered only sometimes shift them).
+    pub fn language_server_headings(&self) -> Vec<(usize, &'static str)> {
+        let rows = self.language_server_rows();
+        let at = |ids: &[CommandId]| rows.iter().position(|(_, id)| id.is_some_and(|id| ids.contains(&id)));
+        [(at(&[CommandId::EnableServer, CommandId::DisableServer]), "Setup"), (at(&[CommandId::ExcludeRubyTooling]), "Indexing")]
+            .into_iter().filter_map(|(row, title)| row.map(|r| (r, title))).collect()
+    }
+
     /// The active file's editing preferences, each with its source, for either adapter. Paths and settings only:
     /// never file contents or environment values.
     pub fn editing_preferences_details(&self) -> String {
@@ -4285,9 +4294,10 @@ impl Session {
 
     /// Full, unwrapped diagnostic snapshot for display and copying in either adapter.
     pub fn language_server_details(&self) -> String {
-        let mut rows = self.server_detail_rows();
-        rows.extend(self.state.notices());
-        rows.join("\n\n")
+        // One labelled line per fact, as Status Details lists them; the notices after a blank line.
+        let notices = self.state.notices();
+        let rows = self.server_detail_rows().join("\n");
+        if notices.is_empty() { rows } else { format!("{rows}\n\n{}", notices.join("\n")) }
     }
 
     /// Server Details without the notices, which Status Details already lists first.
@@ -4300,13 +4310,14 @@ impl Session {
             None if self.state.current_source().is_some() => "No language server supports this document. Syntax highlighting and text search remain available.".into(),
             None => "Open a source file to start its language server automatically.".into(),
         };
-        rows.push(summary);
+        // The server's own summary is labelled; a reason no server applies reads as text.
+        rows.push(if view.is_some() { format!("Server: {summary}") } else { summary });
         // The file itself is outside the build: what the server said and how to bring it in.
         let suggestion = self.maven_suggestion();
         if let Some(outside) = self.state.outside_build() && let Some((profile, folder)) = &suggestion {
-            rows.push(format!("{}.\nIts folder {folder} is added by the Maven profile {profile}, which is not active. Choose Activate Maven Profile “{profile}” for This File: Eclipse JDT LS restarts and imports the project with it.", outside.message.trim_end_matches('.')));
+            rows.push(format!("Build: {}.\nIts folder {folder} is added by the Maven profile {profile}, which is not active. Choose Activate Maven Profile “{profile}” for This File: Eclipse JDT LS restarts and imports the project with it.", outside.message.trim_end_matches('.')));
         } else if let Some(outside) = self.state.outside_build() {
-            rows.push(format!("{}.\n{}", outside.message.trim_end_matches('.'), if outside.no_project {
+            rows.push(format!("Build: {}.\n{}", outside.message.trim_end_matches('.'), if outside.no_project {
                 "Open the folder of the project that contains it, or add it to a project's build, for navigation, completion and full checks."
             } else {
                 "Its folder is not a source folder of the build. Add it in pom.xml or build.gradle (or activate the Maven profile that adds it) for navigation, completion and full checks."
@@ -4325,7 +4336,7 @@ impl Session {
         let unmapped = template.as_ref().is_some_and(|(_, unmapped)| *unmapped);
         rows.extend(template.map(|(rows, _)| rows).unwrap_or_default());
         if let Some((p, root)) = self.state.project_provider() {
-            rows.push(format!("Project settings for {}: {}", root.display(), if self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) { "project overrides global settings" } else { "inheriting global settings" }));
+            rows.push(format!("Project settings: {}", if self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) { "this project overrides the global ones" } else { "the global ones" }));
             if let Some(maven) = self.maven_project().ok().filter(|m| !m.available.is_empty()) {
                 rows.push(format!("Maven profiles: {} (pom.xml declares {}; Maven Profiles… changes them)", if maven.active.is_empty() { "the defaults".to_owned() } else { maven.active.join(", ") }, maven.available.join(", ")));
             }
@@ -4336,7 +4347,7 @@ impl Session {
         if let Some(v) = view {
             let has_root = v.root.is_some();
             if let Some(root) = &v.root {
-                rows.push(format!("Workspace: {}", root.display()));
+                rows.push(format!("Workspace: {}", semantics::runtime::shown_path(root)));
             }
             if let Some(Ok(environment)) = v.environment.as_ref().filter(|e| e.as_ref().is_ok_and(|e| !e.is_empty())) {
                 rows.push(environment.clone());
@@ -4366,28 +4377,28 @@ impl Session {
                 // Stopped for its project environment: the status says what to fix; the server itself is fine.
                 let environment = matches!(v.environment, Some(Err(_)));
                 if environment {
-                    rows.push("The language server was not started: correct the project environment named above, then choose Restart Language Server. Lenz never creates environments or installs packages.".into());
+                    rows.push("Help: The language server was not started: correct the project environment named above, then choose Restart Language Server. Lenz never creates environments or installs packages.".into());
                 } else if unmapped {
-                    rows.push("No language server is asked about this template until its embedded languages can be mapped (the template rows above say what is not).".into());
+                    rows.push("Help: No language server is asked about this template until its embedded languages can be mapped (the template rows above say what is not).".into());
                 } else if matches!(v.status, semantics::Status::Missing(_) | semantics::Status::Failed(_)) {
                     rows.push(format!("Setup: {}", p.setup));
                     if self.runtime_kind().is_some() {
-                        rows.push("Choose Language Server Runtime to select an existing installation, validate it and restart the server. The failure may be a runtime selection or version problem; an exit code alone does not prove incompatibility.".into());
+                        rows.push("Help: Choose Language Server Runtime to select an existing installation, validate it and restart the server. The failure may be a runtime selection or version problem; an exit code alone does not prove incompatibility.".into());
                     }
                 }
                 match v.status {
-                    semantics::Status::Disabled => rows.push("Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into()),
-                    semantics::Status::Restricted(runs) => rows.push(format!("{}: {runs}. Lenz runs no code from a folder until you trust it: with its folder open, choose Restricted in the status bar, Folder Trust… or Trust Project Tools in This Folder.", semantics::provider::RESTRICTED)),
-                    semantics::Status::Missing(_) if self.state.current_source().is_some_and(|d| d.is_large()) => rows.push("Large files do not start a language server. Open a smaller source file to use semantic navigation.".into()),
+                    semantics::Status::Disabled => rows.push("Help: Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into()),
+                    semantics::Status::Restricted(runs) => rows.push(format!("Help: {}: {runs}. Lenz runs no code from a folder until you trust it: with its folder open, choose Restricted in the status bar, Folder Trust… or Trust Project Tools in This Folder.", semantics::provider::RESTRICTED)),
+                    semantics::Status::Missing(_) if self.state.current_source().is_some_and(|d| d.is_large()) => rows.push("Help: Large files do not start a language server. Open a smaller source file to use semantic navigation.".into()),
                     semantics::Status::Missing(_) if unmapped => {}
-                    semantics::Status::Missing(_) if !has_root => rows.push("No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into()),
+                    semantics::Status::Missing(_) if !has_root => rows.push("Help: No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into()),
                     semantics::Status::Failed(_) if environment => {}
                     semantics::Status::Missing(_) | semantics::Status::Failed(_) => {
-                        rows.push("Check the error above, the executable and its runtime/toolchain in the same environment as Lenz. Check executable, args, env and workspace root in your provider settings. After fixing setup, choose Restart Language Server; if no workspace was found, set its root first. Lenz never installs servers automatically.".into());
+                        rows.push("Help: Check the error above, the executable and its runtime/toolchain in the same environment as Lenz. Check executable, args, env and workspace root in your provider settings. After fixing setup, choose Restart Language Server; if no workspace was found, set its root first. Lenz never installs servers automatically.".into());
                     }
-                    semantics::Status::Queued | semantics::Status::Starting => rows.push("Starts automatically when you open a supported source file. Startup is limited to 120 seconds; a failure will be shown here.".into()),
-                    semantics::Status::Indexing(_) => rows.push("The server is still loading the project. Results may be incomplete until indexing finishes.".into()),
-                    semantics::Status::Ready => rows.push("The server is running. If navigation fails, check the workspace root and server capabilities, or restart it.".into()),
+                    semantics::Status::Queued | semantics::Status::Starting => rows.push("Help: Starts automatically when you open a supported source file. Startup is limited to 120 seconds; a failure will be shown here.".into()),
+                    semantics::Status::Indexing(_) => rows.push("Help: The server is still loading the project. Results may be incomplete until indexing finishes.".into()),
+                    semantics::Status::Ready => rows.push("Help: The server is running. If navigation fails, check the workspace root and server capabilities, or restart it.".into()),
                 }
                 rows.push(format!("Provider limits: {}", p.limits));
                 let script = self.state.current_source().is_some_and(|d| d.language() == Some(Language::Bash));
@@ -4405,7 +4416,7 @@ impl Session {
         rows.push(
             format!(
                 "Provider settings: {}",
-                self.state.semantics.settings_file().display()
+                semantics::runtime::shown_path(self.state.semantics.settings_file())
             ),
         );
         rows

@@ -5819,7 +5819,7 @@ impl ReaderView {
         }
         let heading = if matches!(self.modal, Some(Modal::LanguageServer { .. })) {
             // Each section under its heading, a rule above it: a heading must not read as one more command.
-            for (row, title) in [(8, "Indexing"), (4, "Setup")] {
+            for (row, title) in self.session.language_server_headings().into_iter().rev() {
                 if let Some(at) = lines.iter().position(|r| r.0 == row) {
                     lines.insert(at, (usize::MAX, title.into(), true));
                     lines.insert(at, (usize::MAX, String::new(), true));
@@ -7124,7 +7124,9 @@ impl Render for ReaderView {
                                     let first_line = n == 0 || l.lines[n - 1].0 != *row;
                                     // A wrapped line keeps every character, so the space it broke at leads its next line: not drawn.
                                     let line = if details_modal && !first_line { line.strip_prefix(' ').unwrap_or(line) } else { line.as_str() };
-                                    let section = (branch_chooser || commands_modal) && *row == usize::MAX || details_modal && first_line && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
+                                    // A details text line: a section heading, a labelled line (label dimmer than its value), or text.
+                                    let detail = (details_modal && first_line).then(|| code_core::chrome::detail_line(n.checked_sub(1).map(|p| l.lines[p].1.as_str()), line)).unwrap_or(code_core::chrome::DetailLine::Plain);
+                                    let section = (branch_chooser || commands_modal) && *row == usize::MAX || detail == code_core::chrome::DetailLine::Heading;
                                     let heading = Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
                                     // A row with a file-type icon (New Scratch File's kinds): the icon, then its text.
                                     let icon = scratch_icons.as_ref().zip(row.checked_sub(FINDER_HEADER_ROWS)).and_then(|(icons, i)| icons.get(i).copied());
@@ -7157,11 +7159,10 @@ impl Render for ReaderView {
                                         }
                                         None => (line, mx),
                                     };
-                                    // A details line's label is bold up to its colon; its value reads as text.
-                                    let (label, line) = match line.split_once(':').filter(|_| section && details_modal) { Some((label, value)) => (line.get(..label.len() + 1).unwrap_or_default(), value), None => ("", line) };
-                                    if !label.is_empty() { lenz_gpui::text(window, cx, Metrics { font: &heading, ..m }, mx + 12.0, y, label, palette.fg); }
+                                    // A details line's label, up to its colon, is dimmer than its value.
+                                    let (label, line) = match detail { code_core::chrome::DetailLine::Labelled(end) => (line.get(..end).unwrap_or_default(), line.get(end..).unwrap_or(line)), _ => ("", line) };
+                                    if !label.is_empty() { lenz_gpui::text(window, cx, m, mx + 12.0, y, label, palette.readable_on(palette.dim, bg)); }
                                     let mx = mx + lenz_content::wrap::width(label) as f32 * char_w;
-                                    let section = section && label.is_empty();
                                     lenz_gpui::text(window, cx, if section { Metrics { font: &heading, ..m } } else { m }, mx + 12.0, y, line, if *row == usize::MAX { palette.readable_on(palette.dim, bg) } else if *disabled { palette.dim } else if theme_chooser && *row < THEME_HEADER_ROWS { palette.accent } else { palette.fg });
                                 }
                                 lenz_gpui::popup::scrollbar(window, mx, my + l.body_top, mw, l.visible as f32 * line_h(), lenz_gpui::popup::Scrolled { total: l.lines.len(), first: l.first, visible: l.visible }, &palette);

@@ -240,62 +240,61 @@ impl Session {
     /// Full status snapshot, built only when requested so background samples cannot move a details dialog.
     pub fn status_details(&self) -> String {
         let state = self.state();
-        let name = match (state.loading(), state.current_source()) {
-            (Some(path), _) => format!("Loading {}…", crate::archive::Location::from_uri(path).map_or_else(|| path.display().to_string(), |location| location.display_path())),
-            (None, Some(document)) => shown_name(state, document),
-            (None, None) => "No file open — Ctrl+O file, F10 commands".into(),
-        };
-        let project = state.project().map(|project| {
-            let root = project.root().display();
-            match project.coverage() {
-                Coverage::Scanning(n) => format!("{root}: scanning, {n} files so far"),
-                Coverage::Complete(n) if project.refreshing() => {
-                    format!("{root}: {n} files, refreshing")
-                }
-                Coverage::Complete(0) if project.skipped() == 0 => format!("{root}: no files"),
-                Coverage::Complete(n) if project.skipped() == 0 => format!("{root}: {n} files"),
-                Coverage::Complete(n) => format!(
-                    "{root}: {n} files; {} unreadable entries skipped",
-                    project.skipped()
-                ),
-                Coverage::Unavailable(error) => format!("{root}: unavailable ({error})"),
+        let shown = |p: &std::path::Path| crate::semantics::runtime::shown_path(p);
+        // What needs attention first: a question in progress and the notices, each on its own line.
+        let attention: Vec<String> = state.asking().map(|asking| format!("{asking} (Escape cancels)")).into_iter().chain(state.notices().iter().cloned()).collect();
+        let mut file = vec!["File".to_owned()];
+        match (state.loading(), state.current_source()) {
+            (Some(path), _) => file.push(format!("Loading: {}", crate::archive::Location::from_uri(path).map_or_else(|| shown(path), |location| location.display_path()))),
+            (None, Some(document)) if document.source_meta().archive().is_some() || state.active().is_some_and(|t| t.untitled()) => file.push(format!("Name: {}", shown_name(state, document))),
+            (None, Some(document)) => {
+                let path = document.source();
+                file.push(format!("Name: {}", path.file_name().map_or_else(|| shown(path), |n| n.to_string_lossy().into_owned())));
+                if let Some(folder) = path.parent() { file.push(format!("Folder: {}", shown(folder))); }
             }
-        });
+            (None, None) => file.push("Name: none open (Ctrl+O opens a file, F10 lists commands)".into()),
+        }
         let position = self.status_position();
-        let image = state
-            .active()
-            .filter(|t| !t.image_source())
-            .and_then(|t| state.view(t.id())?.snapshot().image())
-            .map(|image| {
-                format!(
-                    "{}×{} · {:?} · {} bytes{}",
-                    image.width,
-                    image.height,
-                    image.format,
-                    image.byte_size,
-                    if image.downscaled {
-                        " · downscaled"
-                    } else {
-                        ""
-                    }
-                )
-            });
-        state
-            .asking()
-            .map(|asking| format!("{asking} (Escape cancels)"))
-            .into_iter()
-            .chain(state.notices())
-            .chain([name])
-            .chain((!position.is_empty()).then_some(position))
-            .chain(self.markers_details())
-            .chain(state.results().filter(|r| r.results_kind() == crate::search::ResultsKind::ProjectSyntax).map(|r| format!("{}\nThe captured project inventory skips ignored folders; links outside the project, binary/lossy text, large files, environment files and SQL without a scan provider are not checked. Per-file findings and the total result list are bounded; known explorer badges retain at most 1024 paths. Cancel Project Syntax Check stops background work; Rerun Search checks again.{}", r.kind(), if r.limited() { " The result limit was reached; coverage is incomplete." } else { "" })))
-            .chain(state.terminal().active().map(|tab| format!("{} — {}\nInitial directory: {}\n{} terminal tabs{}", tab.label(), tab.status(), tab.cwd().display(), state.terminal().tabs().len(), tab.error().map_or(String::new(), |why| format!("\n{why}")))))
-            .chain(image)
+        if !position.is_empty() { file.push(format!("Position: {position}")); }
+        if let Some(changes) = self.markers_details() { file.push(format!("Changes: {changes}")); }
+        if let Some(image) = state.active().filter(|t| !t.image_source()).and_then(|t| state.view(t.id())?.snapshot().image()) {
+            file.push(format!("Image: {}×{} · {:?} · {} bytes{}", image.width, image.height, image.format, image.byte_size, if image.downscaled { " · downscaled" } else { "" }));
+        }
+        let project = state.project().map(|project| {
+            let files = match project.coverage() {
+                Coverage::Scanning(n) => format!("scanning, {n} so far"),
+                Coverage::Complete(n) if project.refreshing() => format!("{n}, refreshing"),
+                Coverage::Complete(0) if project.skipped() == 0 => "none".into(),
+                Coverage::Complete(n) if project.skipped() == 0 => n.to_string(),
+                Coverage::Complete(n) => format!("{n}; {} unreadable entries skipped", project.skipped()),
+                Coverage::Unavailable(error) => format!("unavailable ({error})"),
+            };
+            format!("Project\nFolder: {}\nFiles: {files}", shown(project.root()))
+        });
+        (!attention.is_empty()).then(|| attention.join("\n")).into_iter()
+            .chain([file.join("\n")])
             .chain(project)
-            // Server Details opens with the server's summary; the notices are already first.
-            .chain(self.server_detail_rows())
+            .chain(state.results().filter(|r| r.results_kind() == crate::search::ResultsKind::ProjectSyntax).map(|r| format!("Project syntax check\n{}\nThe captured project inventory skips ignored folders; links outside the project, binary/lossy text, large files, environment files and SQL without a scan provider are not checked. Per-file findings and the total result list are bounded; known explorer badges retain at most 1024 paths. Cancel Project Syntax Check stops background work; Rerun Search checks again.{}", r.kind(), if r.limited() { " The result limit was reached; coverage is incomplete." } else { "" })))
+            .chain(state.terminal().active().map(|tab| format!("Terminal\nTab: {} — {}\nInitial directory: {}\nTabs: {}{}", tab.label(), tab.status(), shown(tab.cwd()), state.terminal().tabs().len(), tab.error().map_or(String::new(), |why| format!("\n{why}")))))
+            // Server Details' rows, one per line under one heading (the notices are already first).
+            .chain([format!("Language server\n{}", self.server_detail_rows().join("\n"))])
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+}
+
+/// How a details dialog draws one of its text lines (both adapters): a section heading, a `Label: value` line (its
+/// label dimmer than its value), or plain text. `previous` is the text line before it (`None`: the first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailLine { Heading, Labelled(usize), Plain }
+
+pub fn detail_line(previous: Option<&str>, line: &str) -> DetailLine {
+    let label = line.split_once(':').map(|(label, _)| label).filter(|label| label.len() <= 40 && !label.contains('/') && !label.contains('`') && !label.trim().is_empty());
+    match label {
+        Some(label) => DetailLine::Labelled(label.len() + 1),
+        // A short line without a colon that opens a paragraph and is no sentence.
+        None if previous.is_none_or(|p| p.trim().is_empty()) && !line.trim().is_empty() && line.chars().count() <= 24 && !line.ends_with(['.', '…', ')']) => DetailLine::Heading,
+        None => DetailLine::Plain,
     }
 }
 

@@ -1163,7 +1163,7 @@ fn gui_and_terminal_project_lsp_actions_save_and_reset_the_same_scope(cx: &mut T
             if id == CommandId::ExcludeRubyTooling {
                 assert_eq!(ruby["projects"][root.to_str().unwrap()]["indexing"]["excludedGems"].as_array().unwrap().contains(&serde_json::json!("parser")), excluded);
                 let details = tui.session.language_server_details();
-                assert!(details.contains("Project settings for") && details.contains("project overrides"));
+                assert!(details.contains("Project settings: this project overrides the global ones"), "{details}");
                 assert!(details.contains(if excluded { "Ruby tooling gem exclusions: enabled" } else { "Ruby tooling gem exclusions: not applied" }));
             } else { assert!(ruby.get("projects").is_none()); }
         }
@@ -1387,8 +1387,8 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
     let tui_details = tui.copy.take().unwrap();
     assert!(gui_details.contains("No language server supports this document"));
     assert_eq!(
-        gui_details.split("\n\nProvider settings:").next(),
-        tui_details.split("\n\nProvider settings:").next()
+        gui_details.split("\nProvider settings:").next(),
+        tui_details.split("\nProvider settings:").next()
     );
     visual.simulate_keystrokes("escape");
     key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
@@ -4574,7 +4574,7 @@ fn python_environment_state_and_a_missing_environment_match_in_both_adapters(cx:
     action(&mut visual, &mut tui, &mut terminal, "server details");
     let (shown, body) = details(&mut visual, &tui);
     assert!(shown.contains(&environment(&groot)), "{shown:?}");
-    assert!(body.contains(&format!("\n\n{}\n\n", environment(&troot))), "{body}");
+    assert!(body.contains(&format!("\n{}\n", environment(&troot))), "{body}");
     visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
     // The environment goes away; a restart leaves Pyright stopped in both, saying why.
     for root in [&groot, &troot] { std::fs::rename(root.join("env"), root.join("moved")).unwrap(); }
@@ -4589,8 +4589,8 @@ fn python_environment_state_and_a_missing_environment_match_in_both_adapters(cx:
     action(&mut visual, &mut tui, &mut terminal, "server details");
     let (shown, body) = details(&mut visual, &tui);
     let advice = "The language server was not started: correct the project environment named above, then choose Restart Language Server. Lenz never creates environments or installs packages.";
-    assert!(shown.contains(&format!("Pyright: stopped: {}", why(&groot))) && shown.iter().any(|r| r == advice), "{shown:?}");
-    assert!(body.starts_with(&format!("Pyright: stopped: {}\n\n", why(&troot))) && body.contains(advice), "{body}");
+    assert!(shown.contains(&format!("Server: Pyright: stopped: {}", why(&groot))) && shown.iter().any(|r| *r == format!("Help: {advice}")), "{shown:?}");
+    assert!(body.starts_with(&format!("Server: Pyright: stopped: {}\n", why(&troot))) && body.contains(advice), "{body}");
     assert!(!shown.iter().any(|r| r.starts_with("Setup: ")) && !body.contains("Setup: "), "no reinstall advice");
     visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
     assert!(gui.read_with(&visual, |v, _| v.modal_rows()).is_empty() && tui.modal_title().is_empty());
