@@ -974,7 +974,7 @@ fn server_errors_are_shown_while_it_keeps_running() {
     assert_eq!(label, "LSP ready");
     assert!(!details.contains("Server error"), "{details}");
     let (label, details, status) = message("window/logMessage", 1, "Error processing initialized: Unable to activate rubocop-1.73.2 (Gem::ConflictError)\n\tfrom specification.rb:1383");
-    assert_eq!((label.as_str(), status), ("LSP error · ready", Status::Ready), "shown, still running");
+    assert_eq!((label.as_str(), status), ("LSP ready", Status::Ready), "still running; the label follows state, not logs");
     assert!(details.contains("Server error: Error processing initialized") && details.contains("Gem::ConflictError") && details.contains("specification.rb:1383"), "{details}");
     let (_, details, _) = message("window/showMessage", 1, "Error while indexing");
     assert!(details.contains("Error while indexing") && !details.contains("Gem::ConflictError"), "the latest error: {details}");

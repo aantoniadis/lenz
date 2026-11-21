@@ -327,19 +327,14 @@ impl ProviderView {
         match &self.status {
             Status::Queued => "LSP waiting",
             Status::Starting => "LSP starting",
-            Status::Indexing(what) if !what.is_empty() => return format!("LSP {}indexing {what}", self.error_mark()),
-            Status::Indexing(_) => return format!("LSP {}indexing", self.error_mark()),
-            Status::Ready => return format!("LSP {}ready", self.error_mark()),
+            Status::Indexing(what) if !what.is_empty() => return format!("LSP indexing {what}"),
+            Status::Indexing(_) => "LSP indexing",
+            Status::Ready => "LSP ready",
             Status::Missing(_) => "LSP unavailable",
             Status::Failed(_) => "LSP stopped",
             Status::Disabled => "LSP off",
             Status::Restricted(_) => "LSP off until trusted",
         }.to_owned()
-    }
-
-    /// First, so a narrow status bar keeps it.
-    fn error_mark(&self) -> &'static str {
-        if self.error.is_some() { "error · " } else { "" }
     }
 
     /// Whether it offers `question` (false until it has initialized).

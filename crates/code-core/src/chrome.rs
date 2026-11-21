@@ -165,10 +165,8 @@ impl Session {
         if let Some(marker) = self.caret_marker() {
             return marker;
         }
-        state.current_source().map_or_else(
-            || "No file open — Ctrl+O file, F10 commands".into(),
-            |d| shown_name(state, d),
-        )
+        // The open file's name is on its tab; the status bar names it only in details.
+        if state.current_source().is_some() { String::new() } else { "No file open — Ctrl+O file, F10 commands".into() }
     }
 
     /// The live snippet's placeholder and what the keys do now, while Tab visits its placeholders rather than

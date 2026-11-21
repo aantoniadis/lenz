@@ -209,13 +209,14 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
                 ),
             ));
         }
-        // An error it logs: marked first in the footer (kept when narrow), its words in the details.
+        // An error it logs: the footer keeps the state (it would flicker between files), its words in the details.
         app.apply(code_core::session::Completion::Semantic(code_core::semantics::Event::Message {
                 session: 1,
                 message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
             }));
         for (width, height) in [(100, 30), (60, 15)] {
-            assert!(text(&draw(&mut app, width, height)).contains("LSP error"));
+            let drawn = text(&draw(&mut app, width, height));
+            assert!(drawn.contains(" LSP ") && !drawn.contains("LSP error"), "{drawn}");
             app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::F(2), crossterm::event::KeyModifiers::NONE,
             )));
