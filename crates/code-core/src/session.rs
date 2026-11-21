@@ -7347,7 +7347,9 @@ impl Session {
                             self.synced = 0;
                         }
                         let which = if profiles.is_empty() { "its default profiles only".to_owned() } else { profiles.join(", ") };
-                        self.state.messages.push(format!("Maven profiles for {}: {which}. Eclipse JDT LS restarts and imports the project with them.", root.display()));
+                        // The folder's name: a status message never carries a full path.
+                        let project = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
+                        self.state.messages.push(format!("Maven profiles for {project}: {which}. Eclipse JDT LS restarts and imports the project with them."));
                     }
                     Err(why) => self.state.messages.push(format!("Maven profiles were not changed: {why}")),
                 }

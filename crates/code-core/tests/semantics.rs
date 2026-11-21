@@ -1957,6 +1957,7 @@ fn maven_profiles_are_given_to_jdtls_through_a_settings_file_of_lenzs() {
     assert!(f.notice("nightly is not a profile of this pom.xml"), "{:?}", f.s.state().notices());
     f.s.dispatch(Command::SetMavenProfiles("benchmarks".into()));
     f.settle(|s| s.state().notices().iter().any(|n| n.starts_with("Maven profiles for")));
+    assert!(f.notice("Maven profiles for proj: benchmarks. Eclipse JDT LS restarts"), "the folder's name, not its path: {:?}", f.s.state().notices());
     assert_eq!(code_core::semantics::maven::active_in(&project.xml), ["benchmarks"]);
     // Restarted with the file as its Maven global settings (added to the user's own ~/.m2/settings.xml).
     let log = f.log.clone();
