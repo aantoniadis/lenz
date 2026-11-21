@@ -734,6 +734,8 @@ pub struct Semantics {
     last_asked: Option<u64>,
     /// Server-originated notices for the session to show (declined edits, server errors).
     pub(crate) notices: Vec<String>,
+    /// For the activity log only: a server error's full text (Server Details shows its first line).
+    pub(crate) logged: Vec<String>,
     idle: std::time::Duration,
     clock: Clock,
     /// The reader's cache folder, outside any checkout: servers' workspace data lives under it.
@@ -770,6 +772,7 @@ impl Semantics {
             trust_wanted: Vec::new(),
             last_asked: None,
             notices: Vec::new(),
+            logged: Vec::new(),
             shell: shell::Linter::default(),
             unmapped: HashMap::new(),
             templates: HashMap::new(),
@@ -1755,7 +1758,7 @@ impl Semantics {
             Event::Message { session, message } => {
                 let Some(s) = self.servers.iter_mut().find(|s| s.session == session) else { return Outcome::default() };
                 let quiet = s.reindexing.is_some();
-                let outcome = s.message(message, &self.settings, (self.clock)(), &mut self.notices);
+                let outcome = s.message(message, &self.settings, (self.clock)(), &mut self.notices, &mut self.logged);
                 s.touch((self.clock)());
                 if !quiet && s.reindexing.is_some() {
                     let events = events.clone();
@@ -2198,7 +2201,7 @@ impl Server {
         }
     }
 
-    fn message(&mut self, m: Value, settings: &Settings, now: std::time::Instant, notices: &mut Vec<String>) -> Outcome {
+    fn message(&mut self, m: Value, settings: &Settings, now: std::time::Instant, notices: &mut Vec<String>, logged: &mut Vec<String>) -> Outcome {
         let name = PROVIDERS[self.key.provider].name;
         match (m.get("method").and_then(Value::as_str), m.get("id").cloned()) {
             (Some(method), Some(id)) => {
@@ -2252,7 +2255,7 @@ impl Server {
                 });
                 Outcome::default()
             }
-            (Some(method), None) => self.notification(method, &m["params"], now, notices),
+            (Some(method), None) => self.notification(method, &m["params"], now, notices, logged),
             (None, Some(id)) => {
                 let id = id.as_i64();
                 // Problems asked about one version: kept as a publication for exactly that text would be.
@@ -2324,7 +2327,7 @@ impl Server {
         }
     }
 
-    fn notification(&mut self, method: &str, params: &Value, now: std::time::Instant, notices: &mut Vec<String>) -> Outcome {
+    fn notification(&mut self, method: &str, params: &Value, now: std::time::Instant, notices: &mut Vec<String>, logged: &mut Vec<String>) -> Outcome {
         match method {
             "$/progress" => {
                 let token = match &params["token"] {
@@ -2389,12 +2392,16 @@ impl Server {
             },
             // An error it reports (Ruby LSP 0.26.11 logs a failed `initialized` and keeps running): kept to be shown.
             "window/logMessage" if params["type"].as_u64() == Some(1) => {
-                self.error = Some(error_text(params["message"].as_str().unwrap_or_default()));
+                let message = params["message"].as_str().unwrap_or_default();
+                self.error = Some(error_text(message));
+                logged.push(format!("{} error: {message}", PROVIDERS[self.key.provider].name));
                 return Outcome { repaint: true, ..Outcome::default() };
             }
             "window/showMessage" if params["type"].as_u64().is_some_and(|t| t <= 2) => {
                 if params["type"].as_u64() == Some(1) {
-                    self.error = Some(error_text(params["message"].as_str().unwrap_or_default()));
+                    let message = params["message"].as_str().unwrap_or_default();
+                    self.error = Some(error_text(message));
+                    logged.push(format!("{} error: {message}", PROVIDERS[self.key.provider].name));
                 }
                 notices.push(format!("{}: {}", PROVIDERS[self.key.provider].name, params["message"].as_str().unwrap_or_default()));
                 return Outcome { repaint: true, ..Outcome::default() };

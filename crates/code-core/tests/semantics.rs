@@ -1070,10 +1070,13 @@ fn server_errors_are_shown_while_it_keeps_running() {
     assert!(!details.contains("Server error"), "{details}");
     let (label, details, status) = message("window/logMessage", 1, "Error processing initialized: Unable to activate rubocop-1.73.2 (Gem::ConflictError)\n\tfrom specification.rb:1383");
     assert_eq!((label.as_str(), status), ("LSP ready", Status::Ready), "still running; the label follows state, not logs");
-    assert!(details.contains("Server error: Error processing initialized") && details.contains("Gem::ConflictError") && details.contains("specification.rb:1383"), "{details}");
+    assert!(details.contains("Server error: Error processing initialized") && details.contains("Gem::ConflictError"), "{details}");
+    // The trace below its first line is in Logs, not in Server Details.
+    assert!(!details.contains("specification.rb:1383") && details.contains("Its full text is in Logs."), "{details}");
     let (_, details, _) = message("window/showMessage", 1, "Error while indexing");
     assert!(details.contains("Error while indexing") && !details.contains("Gem::ConflictError"), "the latest error: {details}");
     assert!(f.s.state().notices().iter().any(|n| n.contains("Error while indexing")), "a shown error is still a notice");
+    assert!(f.s.state().activity_log().iter().any(|row| row.contains("rust-analyzer error: Error processing initialized") && row.contains("specification.rb:1383")), "{:?}", f.s.state().activity_log());
 }
 
 /// Release timing with the fake server: the reader's own cost of a definition round trip (the fake answers

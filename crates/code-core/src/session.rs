@@ -4254,8 +4254,11 @@ impl Session {
         };
         rows.push(summary);
         // Right below its status: the reason it may not be working.
+        // Its first line (a stack trace's message); the whole text is in Logs.
         if let Some(error) = view.as_ref().and_then(|v| v.error.as_ref()) {
-            rows.push(format!("Server error: {error}\nThe server may keep running with reduced results."));
+            let first = error.lines().next().unwrap_or_default();
+            let more = if error.lines().nth(1).is_some() { " Its full text is in Logs." } else { "" };
+            rows.push(format!("Server error: {first}\nThe server may keep running with reduced results.{more}"));
         }
         let template = self.template_rows();
         let unmapped = template.as_ref().is_some_and(|(_, unmapped)| *unmapped);
@@ -8059,6 +8062,7 @@ impl Session {
                 for (real, runs) in self.state.semantics.take_trust_wanted() { self.want_trust(&real, runs); }
                 let mut effect = Effect { repaint: outcome.repaint || !self.state.semantics.notices.is_empty(), copy: None, ..Effect::default() };
                 self.state.messages.append(&mut self.state.semantics.notices);
+                for row in std::mem::take(&mut self.state.semantics.logged) { self.state.messages.record(&row); }
                 if outcome.ready {
                     // Documents open in the server before a waiting request is sent about them.
                     self.synced = 0;
