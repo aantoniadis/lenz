@@ -1284,6 +1284,19 @@ fn the_number_column_keeps_its_background_past_the_last_line() {
     }
 }
 
+/// Only status bar cells that say something are controls: no Status Details target over blank space; the position
+/// is Go to Line.
+#[test]
+fn status_bar_controls_cover_only_drawn_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path(), false);
+    open(&mut app, dir.path(), "notes.txt", b"one\ntwo\n");
+    draw(&mut app, 100, 20);
+    assert_eq!(app.session.status_message(), "");
+    assert!(!app.layout.controls.iter().any(|(id, _)| *id == CommandId::StatusDetails));
+    assert!(app.layout.controls.iter().any(|(id, r)| *id == CommandId::GoToLine && r.y == 19));
+}
+
 #[test]
 fn markdown_lists_show_each_marker_once_and_keep_tight_items_together() {
     let dir = tempfile::tempdir().unwrap();

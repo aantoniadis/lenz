@@ -4076,9 +4076,8 @@ impl ReaderView {
                 self.open_navigation(code_core::navigation::Scope::Actions, cx);
                 return;
             }
-            let (server, _, _, sql, server_action) = self.status_segments();
-            let id = if server.0.contains(&ev.position) { server_action } else if sql.0.contains(&ev.position) { CommandId::SqlDialect } else { CommandId::StatusDetails };
-            self.run(id, window, cx);
+            // Only a drawn cell is a control: blank space between them does nothing.
+            if let Some(id) = self.status_action_at(ev.position) { self.run(id, window, cx); }
             return;
         }
         // A divider: dragged until the button is released.
@@ -4514,10 +4513,7 @@ impl ReaderView {
         let hover = self.modal.is_none().then(|| self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
             .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten().or_else(|| {
                 if self.modal.is_none() && y >= self.height - self.status_h() && self.status_h() > 0.0 {
-                    let (server, message, _, sql, server_action) = self.status_segments();
-                    if server.0.contains(&ev.position) { Some(server_action) }
-                    else if sql.0.contains(&ev.position) { Some(CommandId::SqlDialect) }
-                    else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
+                    self.status_action_at(ev.position)
                 } else { None }
             });
         let preview_hover = self.modal.is_none().then(|| self.panes.iter().find_map(|g| {
@@ -4798,6 +4794,17 @@ impl ReaderView {
         let restricted_w = self.restricted_button().map_or(0.0, |(b, _)| f32::from(b.size.width) + STATUS_PAD);
         let message_w = (room - server_w - sql_w - position_w - restricted_w).max(0.0);
         (cell(left + position_w, server_w, &label), cell(left + position_w + server_w + sql_w, message_w, &self.session.status_message()), cell(left, position_w, &position), cell(left + position_w + server_w, sql_w, &sql), server_action)
+    }
+
+    /// The status bar cell under `at` and what clicking it does: the LSP and SQL labels, the message while it says
+    /// something (its details), and the position (Go to Line). Blank space is no control.
+    fn status_action_at(&self, at: gpui::Point<Pixels>) -> Option<CommandId> {
+        let (server, message, position, sql, server_action) = self.status_segments();
+        if server.0.contains(&at) && !server.1.is_empty() { Some(server_action) }
+        else if sql.0.contains(&at) && !sql.1.is_empty() { Some(CommandId::SqlDialect) }
+        else if message.0.contains(&at) && !message.1.is_empty() { Some(CommandId::StatusDetails) }
+        else if position.0.contains(&at) && !position.1.is_empty() { Some(CommandId::GoToLine) }
+        else { None }
     }
 
     /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
@@ -6750,7 +6757,9 @@ impl Render for ReaderView {
                             let status_y = y0 + h - status_h;
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
-                            for ((b, label), color, action) in [(&server_cell, server_color, Some(server_action)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&position_cell, palette.dim, None)] {
+                            let message_action = (!message_cell.1.is_empty()).then_some(CommandId::StatusDetails);
+                            let position_action = (!position_cell.1.is_empty()).then_some(CommandId::GoToLine);
+                            for ((b, label), color, action) in [(&server_cell, server_color, Some(server_action)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&message_cell, palette.fg, message_action), (&position_cell, palette.dim, position_action)] {
                                 let clip = Bounds { origin: gpui::point(px(x0 + f32::from(b.origin.x)), px(status_y)), size: b.size };
                                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                     if action.is_some() && nav_hover == action { lenz_gpui::fill(window, f32::from(clip.origin.x), status_y + 2.0, f32::from(clip.size.width), status_h - 4.0, palette.selected_bg); }

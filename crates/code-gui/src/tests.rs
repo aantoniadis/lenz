@@ -6389,6 +6389,23 @@ fn recent_files_use_search_presentation_filter_delete_and_keep_query_between_mod
     v.simulate_keystrokes("escape");
 }
 
+/// Only drawn status bar cells are controls: blank space between them opens nothing; the position opens Go to Line.
+#[gpui::test]
+fn status_bar_blank_space_is_no_control_and_the_position_goes_to_a_line(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("notes.txt", b"one\ntwo\n")));
+    settle(cx, &f, active_is("notes.txt"));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    let (message, position) = f.view.read_with(&v, |r, _| { let s = r.status_segments(); (s.1, s.2) });
+    assert!(message.1.is_empty(), "nothing to say: {:?}", message.1);
+    v.simulate_click(message.0.center(), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()), "blank space opens nothing");
+    assert!(!position.1.is_empty());
+    v.simulate_click(position.0.center(), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::GoTo { .. }))));
+}
+
 #[gpui::test]
 fn wheel_scrolls_theme_place_and_server_dialogs_without_selecting(cx: &mut TestAppContext) {
     let text = "class Main {}\n".repeat(40);

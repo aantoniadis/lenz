@@ -831,6 +831,10 @@ impl App {
             &code_core::chrome::ellipsize(&position, position_width as usize),
             style(p.fg, p.status_bg),
         );
+        // The position opens Go to Line, as in the GUI.
+        if position_width > 0 && !position.trim().is_empty() {
+            geometry.controls.push((CommandId::GoToLine, position_rect));
+        }
         let available = available.saturating_sub(position_width);
         let lsp_width = if save_notice { 0 } else { (lsp.width() as u16).min(available / 2) };
         let lsp_rect = Rect::new(position_rect.right(), area.y, lsp_width, 1);
@@ -887,9 +891,10 @@ impl App {
             &code_core::chrome::ellipsize(&format!(" {message}"), message_rect.width as usize),
             style(p.fg, p.status_bg),
         );
-        geometry
-            .controls
-            .push((CommandId::StatusDetails, message_rect));
+        // A cell is a control only while it says something; blank space between cells does nothing.
+        if !message.is_empty() {
+            geometry.controls.push((CommandId::StatusDetails, message_rect));
+        }
     }
 
     fn draw_tree(&mut self, frame: &mut ratatui::Frame, area: Rect, p: &Palette) {
