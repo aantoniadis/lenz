@@ -2021,6 +2021,18 @@ fn definition_on_this_lands_on_the_enclosing_class() {
     assert!((at..at + 4).contains(&f.s.state().selection().unwrap().head), "back on `this`");
 }
 
+/// The class `this` names is found with no server holding the text: in a folder never trusted, JDT LS does not start.
+#[test]
+fn definition_on_this_needs_no_server() {
+    let source = "public class Holder {\n    int value;\n    Holder(int value) { this.value = value; }\n}\n";
+    let mut f = untrusted_fixture("jdtls", &[("pom.xml", "<project/>\n"), ("Holder.java", source)], serde_json::json!({}));
+    f.s.dispatch(Command::Open(f.root.join("Holder.java")));
+    f.settle(|s| s.state().active().and_then(|t| s.state().view(t.id())).is_some_and(|v| v.declarations().is_some()));
+    f.definition("this.value", false);
+    assert_eq!(f.selected_text(), "Holder");
+    assert!(f.s.state().asking().is_none());
+}
+
 #[test]
 fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session() {
     let files = [("pom.xml", ""), ("src/A.java", "class A {\n    void m() { virt(); }\n}\n")];

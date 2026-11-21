@@ -6592,6 +6592,11 @@ impl Session {
     /// Ask about `offset` of `doc` (a snapshot a tab holds).
     fn ask_at(&mut self, tab: TabId, offset: usize, ask: Ask) -> Effect {
         if self.state.tabs.iter().any(|t| t.id == tab && t.read_only_side().is_some()) { return Effect::default(); }
+        // `this` names the class around it: land on that class's name, as IntelliJ does (JDT LS answers nothing).
+        // Before any wait for the server: a busy one may not hold this text yet.
+        if ask == Ask::Definition && self.state.active == Some(tab) && let Some(name) = self.this_target(tab, offset) {
+            return self.select_in_active(name);
+        }
         self.semantic_seq += 1;
         let request = self.semantic_seq;
         self.semantic_wait.remove(&semantics::Lane::Foreground);
@@ -6606,12 +6611,6 @@ impl Session {
     }
 
     fn ask_ready(&mut self, doc: Arc<Document>, offset: usize, ask: Ask, request: u64) -> Effect {
-        // `this` names the class around it: land on that class's name, as IntelliJ does (JDT LS answers nothing).
-        if ask == Ask::Definition && let Some(name) = self.this_target(&doc, offset) {
-            self.state.asking = None;
-            let hit = semantics::hit_at(doc.source(), &doc, name.start, name.end);
-            return self.open_at(doc.source().to_owned(), &hit, None, doc);
-        }
         if let Ask::TypeHierarchy(direction) = ask
             && !self.state.semantics.view(&doc).is_some_and(|v| v.offers(semantics::Question::PrepareTypeHierarchy))
         {
@@ -6637,20 +6636,35 @@ impl Session {
     /// document's tab holds for this version (for breadcrumbs and sticky scroll, both on by default). `None`: not
     /// `this`, or no current parse (the server is asked as for any name). shortcut: an anonymous class's `this` lands
     /// on the named class around it; upgrade when declarations record anonymous classes.
-    fn this_target(&self, doc: &Document, offset: usize) -> Option<std::ops::Range<usize>> {
+    fn this_target(&self, tab: TabId, offset: usize) -> Option<std::ops::Range<usize>> {
         use highlight::Language as L;
-        if !matches!(doc.language()?, L::Java | L::Kotlin | L::JavaScript | L::TypeScript | L::Tsx | L::CSharp | L::Cpp) { return None; }
-        let line = doc.line_of(offset);
-        let (start, text) = (doc.line_range(line).start, doc.line(line));
-        let col = offset - start;
-        let word = crate::document::identifier(text, col).or_else(|| col.checked_sub(1).filter(|c| text.is_char_boundary(*c)).and_then(|c| crate::document::identifier(text, c)))?;
+        let view = self.state.view(tab)?;
+        let snapshot = view.snapshot();
+        if !matches!(snapshot.language()?, L::Java | L::Kotlin | L::JavaScript | L::TypeScript | L::Tsx | L::CSharp | L::Cpp) { return None; }
+        let line = snapshot.line_range(snapshot.line_of(offset))?;
+        let text = snapshot.copy_range(line.clone())?;
+        let col = offset.checked_sub(line.start)?;
+        let word = crate::document::identifier(&text, col).or_else(|| col.checked_sub(1).filter(|c| text.is_char_boundary(*c)).and_then(|c| crate::document::identifier(&text, c)))?;
         if text.get(word.clone()) != Some("this") { return None; }
-        let tab = self.state.tabs.iter().find(|t| t.source == doc.source() && t.read_only_side().is_none())?;
-        let view = self.state.view(tab.id)?;
-        if view.snapshot().key().version != doc.version() { return None; }
-        let class = view.declarations()?.enclosing((start + word.start) as u32).into_iter().rev()
+        let class = view.declarations()?.enclosing((line.start + word.start) as u32).into_iter().rev()
             .find(|d| matches!(d.kind, lenz_content::highlight::DeclKind::Type | lenz_content::highlight::DeclKind::Interface))?;
         Some(class.name_range.start as usize..class.name_range.end as usize)
+    }
+
+    /// Select `range` of the active document and show it, as a jump Back returns from.
+    fn select_in_active(&mut self, range: std::ops::Range<usize>) -> Effect {
+        let from = self.here();
+        let Some(doc) = self.state.current() else { return Effect::default() };
+        let line = doc.line_of(range.start);
+        let byte = range.start - doc.line_range(line).map_or(range.start, |r| r.start);
+        let Some(t) = self.active_mut() else { return Effect::default() };
+        t.place_selection(Some(Selection { anchor: range.start, head: range.end }));
+        t.expansion = None;
+        t.reveal(line);
+        let id = t.id;
+        self.bring_into_view(id, line, byte);
+        if let Some(to) = self.here() { self.visit(from, to); }
+        Effect { repaint: true, ..Effect::default() }
     }
 
     /// A type hierarchy built from usages and syntax (the server offers none): the name at `offset` is the root.
