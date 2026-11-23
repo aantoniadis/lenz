@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    ffi::{OsStr, OsString},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -14,18 +15,18 @@ const NO_LAZY_FETCH: (u32, u32) = (2, 45);
 
 /// A `git` command running in `cwd`, or why git can't be used.
 pub fn command(cwd: &Path) -> Result<Command, String> {
-    let version = usable().clone()?;
+    let git = installed()?;
     let untrusted = untrusted(cwd);
     if let Some(key) = &untrusted.refused {
         return Err(format!("lenz: this repository's own config sets {key}, a program Lenz cannot switch off; use git yourself if you trust it"));
     }
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(&git.program);
     // `status` must not take `index.lock` behind the user's own git. Arguments, not GIT_OPTIONAL_LOCKS or
     // GIT_CONFIG_*: any env override makes std copy the whole environment on every spawn (~70 µs with a typical
     // desktop env).
     cmd.current_dir(cwd).arg("--no-optional-locks");
     // An object a promisor remote holds would be fetched with the repository's own transport settings.
-    if version >= NO_LAZY_FETCH {
+    if git.version >= NO_LAZY_FETCH {
         cmd.arg("--no-lazy-fetch");
     } else if untrusted.promisor {
         return Err("lenz: this repository's own config names a promisor remote; reading it without fetching needs git 2.45 or later".into());
@@ -243,12 +244,23 @@ pub const MAX_OBJECT: usize = 1 << 30;
 /// The installed git's (major, minor), or `None` when git isn't usable.
 #[allow(dead_code)] // for `conflicts::merge_file`
 pub fn version() -> Option<(u32, u32)> {
-    usable().as_ref().ok().copied()
+    usable().as_ref().ok().map(|git| git.version)
 }
 
-fn usable() -> &'static Result<(u32, u32), String> {
-    static USABLE: OnceLock<Result<(u32, u32), String>> = OnceLock::new();
+/// The git Lenz runs: the program it resolved once per run, and its (major, minor).
+struct Git {
+    program: PathBuf,
+    version: (u32, u32),
+}
+
+fn usable() -> &'static Result<Git, String> {
+    static USABLE: OnceLock<Result<Git, String>> = OnceLock::new();
     USABLE.get_or_init(check)
+}
+
+/// The git Lenz runs, or why there is none it can use.
+fn installed() -> Result<&'static Git, String> {
+    usable().as_ref().map_err(Clone::clone)
 }
 
 /// A `git` command in `cwd` as the user's own terminal would run it: the repository's hooks, filters and config all
@@ -256,14 +268,35 @@ fn usable() -> &'static Result<(u32, u32), String> {
 /// a repository's programs from running when it is merely read. Messages in the C locale (callers read git's
 /// refusals), paths unquoted, never waiting on a prompt.
 pub fn command_as_user(cwd: &Path) -> Result<Command, String> {
-    usable().clone()?;
-    let mut cmd = Command::new("git");
+    let git = installed()?;
+    let mut cmd = Command::new(&git.program);
     cmd.current_dir(cwd)
         .args(["-c", "core.quotePath=false"])
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null());
+    with_git_path(&mut cmd);
     Ok(cmd)
+}
+
+/// Put the directory of the git in use first on `PATH` when a desktop launch's own `PATH` lacks it, so a hook or
+/// helper the git process starts (`git lfs`, a pre-commit script calling `git`) finds the same install instead of
+/// `/usr/bin/git`, Apple's stub. The callers already set variables, so the environment is copied either way.
+fn with_git_path(cmd: &mut Command) {
+    let Ok(git) = installed() else { return };
+    let Some(dir) = git.program.parent() else { return };
+    if let Some(path) = path_with_dir(dir) {
+        cmd.env("PATH", path);
+    }
+}
+
+/// `PATH` with `dir` first, or `None` when it is already on it (the usual terminal and Linux desktop launch).
+fn path_with_dir(dir: &Path) -> Option<OsString> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&path).any(|existing| existing == dir) {
+        return None;
+    }
+    std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&path))).ok()
 }
 
 /// [`run`] as the user: see [`command_as_user`].
@@ -284,7 +317,10 @@ pub fn run_network(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     if let Some(key) = &untrusted(cwd).network {
         return Err(format!("lenz: this repository's own config sets {key}, which the fetch would use; fetch it yourself if you trust it"));
     }
-    finish(command(cwd)?.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()))
+    let mut cmd = command(cwd)?;
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    with_git_path(&mut cmd);
+    finish(&mut cmd)
 }
 
 fn finish(cmd: &mut Command) -> Result<Vec<u8>, String> {
@@ -354,34 +390,104 @@ pub fn may_be_in_repository(cwd: &Path) -> bool {
     cwd.ancestors().any(|dir| dir.join(".git").exists() || (dir.join("HEAD").is_file() && dir.join("objects").is_dir()))
 }
 
-fn check() -> Result<(u32, u32), String> {
-    if cfg!(target_os = "macos") {
-        check_macos_stub()?;
+/// Directories an installed git may live in that a launched GUI app's `PATH` can miss. A Finder-launched macOS app
+/// gets only `/usr/bin:/bin:/usr/sbin:/sbin`, where `/usr/bin/git` is Apple's stub, and Homebrew's and MacPorts' git
+/// are in none of them; a Linux `.desktop` launch can miss Homebrew's prefix the same way.
+#[cfg(target_os = "macos")]
+const INSTALL_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/opt/local/bin",
+    // The Command Line Tools' own git, which `xcode-select` can fail to point at after a macOS upgrade.
+    "/Library/Developer/CommandLineTools/usr/bin",
+];
+#[cfg(not(target_os = "macos"))]
+const INSTALL_DIRS: &[&str] = &["/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"];
+
+/// macOS's `/usr/bin/git`: a stub that forwards to the Command Line Tools, and pops up their installer when missing.
+const MACOS_STUB: &str = "/usr/bin/git";
+
+/// The first git Lenz can use: `PATH`'s in order, then [`INSTALL_DIRS`], then `LENZ_GIT` if it alone is named.
+fn check() -> Result<Git, String> {
+    let mut reason = None;
+    let mut too_old = None;
+    for program in candidates() {
+        // Spawning the stub without the Command Line Tools is what pops up their installer: look elsewhere first.
+        if cfg!(target_os = "macos") && program == Path::new(MACOS_STUB) && !command_line_tools_git() {
+            reason.get_or_insert_with(|| "lenz: git is not installed (macOS Command Line Tools missing); \
+                run `xcode-select --install`, `brew install git`, or set LENZ_GIT".to_string());
+            continue;
+        }
+        match probe(&program) {
+            Ok(version) if version >= MIN_VERSION => return Ok(Git { program, version }),
+            Ok(version) => {
+                if too_old.is_none_or(|best| version > best) {
+                    too_old = Some(version);
+                }
+            }
+            Err(message) => {
+                reason.get_or_insert(message);
+            }
+        }
     }
-    let out = Command::new("git").arg("--version").output().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "lenz: git not found; install git 2.30 or later".to_string(),
-        _ => format!("lenz: cannot run git: {e}"),
-    })?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    match parse_version(&text) {
-        Some(v) if v >= MIN_VERSION => Ok(v),
-        Some((major, minor)) => Err(format!("lenz: git 2.30 or later is required (found {major}.{minor})")),
-        None => Err(format!("lenz: cannot read the git version from {:?}", text.trim())),
+    if let Some((major, minor)) = too_old {
+        return Err(format!("lenz: git 2.30 or later is required (found {major}.{minor})"));
     }
+    Err(reason.unwrap_or_else(|| "lenz: git not found; install git 2.30 or later".into()))
 }
 
-/// On macOS `/usr/bin/git` is a stub that pops up an install dialog unless the Command Line Tools exist.
-fn check_macos_stub() -> Result<(), String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let resolved = std::env::split_paths(&path).map(|d| d.join("git")).find(|p| p.is_file());
-    if resolved.as_deref() != Some(Path::new("/usr/bin/git")) {
-        return Ok(());
+/// The git programs to try, in order, each once: `PATH`'s, then [`INSTALL_DIRS`]'. `LENZ_GIT` names one instead.
+fn candidates() -> Vec<PathBuf> {
+    if let Some(program) = std::env::var_os("LENZ_GIT").filter(|program| !program.is_empty()) {
+        let program = std::path::absolute(Path::new(&program)).unwrap_or_else(|_| PathBuf::from(program));
+        return vec![program];
     }
-    let hint = "lenz: git is not installed (macOS Command Line Tools missing); \
-                run `xcode-select --install` or `brew install git`";
-    let out = Command::new("xcode-select").arg("-p").output().map_err(|_| hint.to_string())?;
-    let dev_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if out.status.success() && dev_dir.join("usr/bin/git").is_file() { Ok(()) } else { Err(hint.into()) }
+    candidate_dirs(&std::env::var_os("PATH").unwrap_or_default())
+        .into_iter()
+        .map(|dir| dir.join("git"))
+        .filter(|program| program.is_file())
+        .collect()
+}
+
+/// The directories to look for `git` in: `PATH`'s first, in order, then [`INSTALL_DIRS`], deduplicated. Empty entries
+/// are dropped, and a relative one is made absolute here: `command` runs in another directory, where it would resolve
+/// to a different file.
+fn candidate_dirs(path: &OsStr) -> Vec<PathBuf> {
+    let from_path = std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .filter_map(|dir| std::path::absolute(dir).ok());
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for dir in from_path.chain(INSTALL_DIRS.iter().map(|dir| PathBuf::from(*dir))) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// `program --version`, read as (major, minor).
+fn probe(program: &Path) -> Result<(u32, u32), String> {
+    let out = Command::new(program).arg("--version").output().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => format!("lenz: git not found at {}", program.display()),
+        _ => format!("lenz: cannot run git at {}: {error}", program.display()),
+    })?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_version(&text).ok_or_else(|| format!("lenz: cannot read the git version from {:?}", text.trim()))
+}
+
+/// Whether macOS's `/usr/bin/git` stub has Command Line Tools to forward to. A macOS upgrade can also leave the
+/// selected developer directory dangling, which the stub fails on with an `xcrun` error.
+fn command_line_tools_git() -> bool {
+    let Ok(out) = Command::new("/usr/bin/xcode-select").arg("-p").output() else {
+        return false;
+    };
+    let developer = String::from_utf8_lossy(&out.stdout);
+    let developer = developer.trim();
+    // `-p` prints `/` when no developer directory is selected: `/usr/bin/git` is then the stub itself.
+    out.status.success()
+        && !developer.is_empty()
+        && developer != "/"
+        && Path::new(developer).join("usr/bin/git").is_file()
 }
 
 /// `git version 2.39.3 (Apple Git-146)` → (2, 39).
@@ -526,6 +632,67 @@ mod tests {
     #[test]
     fn installed_git_passes_the_startup_check() {
         assert!(check().is_ok());
+    }
+
+    #[test]
+    fn commands_start_the_git_resolved_once_and_not_a_path_lookup() {
+        let program = usable().as_ref().unwrap().program.clone();
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(command(Path::new(".")).unwrap().get_program(), program.as_os_str());
+        assert_eq!(command_as_user(Path::new(".")).unwrap().get_program(), program.as_os_str());
+    }
+
+    #[test]
+    fn candidate_dirs_follow_path_then_the_installs_each_once() {
+        let dirs = candidate_dirs(OsStr::new("/usr/bin:/usr/bin::relative"));
+        assert_eq!(dirs[0], PathBuf::from("/usr/bin"));
+        assert_eq!(dirs[1], std::env::current_dir().unwrap().join("relative"));
+        assert!(!dirs.contains(&std::env::current_dir().unwrap()), "an empty PATH entry is not the current directory");
+        for dir in INSTALL_DIRS {
+            assert!(dirs.contains(&PathBuf::from(dir)), "{dir} is searched");
+        }
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), dirs.len(), "{dirs:?}");
+    }
+
+    #[test]
+    fn a_git_path_is_added_once_and_only_when_missing() {
+        let missing = std::path::Path::new("/nonexistent/lenz-only-for-this-test");
+        let path = path_with_dir(missing).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(entries.first().unwrap(), missing);
+        assert_eq!(entries.len(), std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).count() + 1);
+        let on_path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).next().unwrap();
+        assert_eq!(path_with_dir(&on_path), None, "the usual launch needs no override");
+    }
+
+    #[test]
+    fn a_git_that_is_old_or_unreadable_is_passed_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = |name: &str, output: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho '{output}'\n")).unwrap();
+            std::fs::set_permissions(&path, PermissionsExt::from_mode(0o755)).unwrap();
+            path
+        };
+        // Tests run in parallel, and a fork in another one can transiently hold a just-written file open, which exec
+        // refuses with ETXTBSY: retry rather than fail the suite on that race.
+        let probe_ready = |path: &Path| {
+            for _ in 0..50 {
+                match probe(path) {
+                    Err(message) if message.contains("Text file busy") => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    result => return result,
+                }
+            }
+            probe(path)
+        };
+        assert!(probe_ready(&fake("current", "git version 2.56.1")).unwrap() >= MIN_VERSION);
+        assert!(probe_ready(&fake("old", "git version 2.20.1")).unwrap() < MIN_VERSION);
+        assert!(probe_ready(&fake("garbage", "nonsense")).unwrap_err().contains("cannot read the git version"));
+        assert!(probe_ready(&dir.path().join("absent")).unwrap_err().contains("not found"));
     }
 
     #[test]

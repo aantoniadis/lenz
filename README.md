@@ -165,6 +165,8 @@ Builds for macOS (Apple Silicon) and Linux (x86_64, aarch64) are on the [GitHub 
 
 Every package installs all five executables; `lenz` finds the others beside it. Linux binaries need glibc 2.35 or later; the GUI also loads the system's libxkbcommon-x11, libxcb and Vulkan loader at runtime (Debian/Ubuntu: `libxkbcommon-x11-0 libxcb1 libvulkan1`), which desktop installations already have.
 
+Lenz runs the first `git` on its `PATH`, then one installed where an app started from the desktop cannot look: on macOS Homebrew's and MacPorts' prefixes and the Command Line Tools' own `git`, on Linux `/usr/local/bin` and Homebrew's `/home/linuxbrew/.linuxbrew/bin`. macOS's `/usr/bin/git` is Apple's stub and is only run when the Command Line Tools are installed, so an installed Homebrew git is used instead of asking for them; `LENZ_GIT` names an absolute path to run instead.
+
 Linux tarballs include the logo and two desktop entries, **Lenz Code** (`lenz.desktop`) and **Lenz Diff** (`lenz-diff.desktop`, which opens the comparison/repository chooser described below); the AUR and Linux Homebrew packages install them.
 
 ## Build
