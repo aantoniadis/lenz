@@ -108,6 +108,13 @@ fn with_sessions<R>(
         .flatten()
 }
 pub(super) fn request(id: SessionId, all: bool, cx: &mut App) {
+    request_matching(move |e| all || e.id == id, cx);
+}
+/// Close every session (project tab) in `window`, each asking about its unsaved work.
+pub(super) fn request_window(window: gpui::AnyWindowHandle, cx: &mut App) {
+    request_matching(move |e| e.window.window_id() == window.window_id(), cx);
+}
+fn request_matching(matches: impl Fn(&Entry) -> bool + 'static, cx: &mut App) {
     if !cx.has_global::<ReaderClose>() {
         return;
     }
@@ -116,7 +123,7 @@ pub(super) fn request(id: SessionId, all: bool, cx: &mut App) {
             .global::<ReaderClose>()
             .entries
             .iter()
-            .filter(|e| all || e.id == id)
+            .filter(|e| matches(e))
             .cloned()
             .collect::<Vec<_>>();
         let mut coordinator =
@@ -170,10 +177,17 @@ fn pump(cx: &mut App) {
             }
             s.entries.retain(|e| !ids.contains(&e.id));
         });
+        // A project tab closes alone; its window closes with its last project (or when it has no project host).
         for entry in live.iter().filter(|e| ids.contains(&e.id)) {
-            let _ = entry
-                .window
-                .update(cx, |_, window, _| window.remove_window());
+            let empty = match entry.window.downcast::<ProjectsWindow>() {
+                Some(host) => host.update(cx, |host, window, cx| host.remove(entry.id, window, cx)).unwrap_or(true),
+                None => true,
+            };
+            if empty {
+                let _ = entry
+                    .window
+                    .update(cx, |_, window, _| window.remove_window());
+            }
         }
     } else {
         for entry in &live {
@@ -200,10 +214,16 @@ fn pump(cx: &mut App) {
             let _ = entry
                 .window
                 .update(cx, |_, window, _| window.activate_window());
+            if let Some(host) = entry.window.downcast::<ProjectsWindow>() {
+                let _ = host.update(cx, |host, window, cx| host.reveal(id, window, cx));
+            }
         }
     }
 }
 impl ReaderView {
+    /// The native close button of a window this view fills alone (tests open such windows without a project host;
+    /// production windows ask [`ProjectsWindow::window_should_close`], which closes each project the same way).
+    #[cfg(all(test, feature = "test-support"))]
     pub(super) fn window_should_close(&mut self, cx: &mut Context<Self>) -> bool {
         if self.session.closed() {
             return true;

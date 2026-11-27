@@ -208,14 +208,85 @@ fn progress_closes(views: &mut Vec<App>, active: &mut usize, coordinator: &mut c
             before!=*active || hidden(views)<waiting
         }
         Progress::Committed(ids) => {
+            let kept: Vec<bool> = views.iter().map(|v| !ids.contains(&v.session.id())).collect();
+            let mut set = code_core::projects::Projects::with(views.len(), *active, code_core::projects::Layout::Tabs);
+            set.retain(&kept);
             views.retain(|v| !ids.contains(&v.session.id()));
             for id in ids { coordinator.unregister(id); }
-            *active=(*active).min(views.len().saturating_sub(1)); true
+            *active=set.active().min(views.len().saturating_sub(1)); true
         }
         Progress::Cancelled => { for view in views.iter_mut() { view.clamp(); } true }
         Progress::Idle => false,
     }
 }
+/// A view asked for a new one (New Project Tab, Open Folder in New Project Tab, New Window, a worktree): it opens
+/// at the end, on its folder when one was given, and takes the keys.
+fn open_new_view(views: &mut Vec<App>, active: &mut usize, make: impl FnOnce(Option<PathBuf>) -> App) -> bool {
+    if !views.get_mut(*active).is_some_and(|v| std::mem::take(&mut v.new_view)) { return false; }
+    views[*active].handle(Event::FocusLost);
+    let root = views[*active].new_view_root.take();
+    views.push(make(root));
+    *active = views.len() - 1;
+    true
+}
+
+/// Begin closing project `index` (its unsaved work is asked about first), as its close mark on the strip asks.
+fn close_project(views: &mut Vec<App>, active: &mut usize, coordinator: &mut code_core::close::CloseCoordinator, index: usize) -> bool {
+    if index >= views.len() { return false; }
+    for view in views.iter() { coordinator.register(view.session.id()); }
+    coordinator.begin(&mut [&mut views[index].session]);
+    progress_closes(views, active, coordinator) | true
+}
+
+/// Give the keys to project `index`: the one losing them ends its pointer and modifier state, the one gaining them
+/// rechecks its files against the disk, as switching with F8 always has.
+fn switch_project(views: &mut [App], active: &mut usize, index: usize) -> bool {
+    if index == *active || index >= views.len() { return false; }
+    views[*active].handle(Event::FocusLost);
+    *active = index;
+    views[*active].dispatch(code_core::session::Command::Recheck);
+    true
+}
+
+/// A project request a view made of the runtime (Next / Previous Project Tab, Projects Side by Side).
+fn project_request(views: &mut [App], active: &mut usize, layout: &mut code_core::projects::Layout) -> bool {
+    use code_core::projects::{Action, Projects};
+    let Some(request) = views.get_mut(*active).and_then(|v| v.project_request.take()) else { return false };
+    let mut set = Projects::with(views.len(), *active, *layout);
+    match request {
+        Action::Next | Action::Previous => { let to = set.step(request == Action::Next); switch_project(views, active, to); }
+        Action::ToggleSideBySide => *layout = set.toggle_layout(),
+        // The view acts on these itself: a new view, the folder prompt, or closing through the coordinator.
+        Action::New | Action::OpenFolder | Action::Close => {}
+    }
+    true
+}
+
+/// Pointer input while several projects share the terminal: the strip's tabs and buttons, then the column under the
+/// pointer (a press there gives it the keys), in that view's own coordinates.
+fn project_pointer(views: &mut Vec<App>, active: &mut usize, layout: &mut code_core::projects::Layout, coordinator: &mut code_core::close::CloseCoordinator, geometry: &crate::projects::Geometry, mouse: crossterm::event::MouseEvent) -> bool {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if mouse.row == 0 {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) { return false; }
+        return match geometry.strip_hit(mouse.column) {
+            Some(crate::projects::StripHit::Activate(i)) => switch_project(views, active, i),
+            Some(crate::projects::StripHit::Close(i)) => close_project(views, active, coordinator, i),
+            Some(crate::projects::StripHit::New) => { views[*active].new_view = true; true }
+            Some(crate::projects::StripHit::ToggleLayout) => {
+                *layout = code_core::projects::Projects::with(views.len(), *active, *layout).toggle_layout();
+                true
+            }
+            None => false,
+        };
+    }
+    let Some((index, translated)) = crate::projects::route(geometry, *active, mouse) else { return false };
+    let mut dirty = false;
+    if index != *active && crate::projects::activates(&Event::Mouse(mouse)) { dirty |= switch_project(views, active, index); }
+    if index == *active { dirty |= dispatch_input(views, active, coordinator, Event::Mouse(translated)); }
+    else { dirty |= views[index].handle(Event::Mouse(translated)); }
+    dirty
+}
+
 fn dispatch_input(views: &mut Vec<App>, active: &mut usize, coordinator: &mut code_core::close::CloseCoordinator, event: Event) -> bool {
     let mut dirty=views[*active].handle(event);
     let all=std::mem::take(&mut views[*active].quit_all);
@@ -235,27 +306,35 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
     restore_on_signal();
     let mut views = vec![App::new(Config::from_env(true), path)];
     let mut active = 0usize;
+    let mut layout = code_core::projects::Layout::Tabs;
+    let mut geometry = crate::projects::Geometry::default();
     let mut coordinator = code_core::close::CloseCoordinator::default();
     let mut input = None;
     let mut dirty = true;
     let mut pointer_text = false;
     loop {
         // A bounded batch keeps input responsive even during a fast project scan.
+        // Shown: the active project, and the others Side by Side columns showed at the last draw.
+        let shown = |i: usize, active: usize, geometry: &crate::projects::Geometry| i == active || geometry.columns.iter().any(|(c, _)| *c == i);
         for (i, view) in views.iter_mut().enumerate() {
             let completions = view.session.completions();
             for _ in 0..code_core::session::COMPLETIONS {
                 let Ok(c) = completions.try_recv() else { break };
-                dirty |= view.apply(c) && i == active;
+                dirty |= view.apply(c) && shown(i, active, &geometry);
             }
             let updates = view.session.theme_updates();
             while let Ok(t) = updates.try_recv() {
-                dirty |= view.apply(Completion::Theme(Box::new(t))) && i == active;
+                dirty |= view.apply(Completion::Theme(Box::new(t))) && shown(i, active, &geometry);
             }
         }
         if dirty {
-            views[active].independent_view = (views.len() > 1).then_some((active + 1, views.len()));
-            terminal.draw(|frame| views[active].draw(frame))?;
-            views[active].session.start_themes();
+            let set = code_core::projects::Projects::with(views.len(), active, layout);
+            layout = set.layout();
+            crate::projects::sync(&mut views, &set);
+            terminal.draw(|frame| crate::projects::draw(frame, &mut views, &set, &mut geometry))?;
+            for (i, view) in views.iter_mut().enumerate() {
+                if shown(i, active, &geometry) { view.session.start_themes(); }
+            }
             dirty = false;
         }
         if let Some(launch) = views[active].foreground.take() {
@@ -268,11 +347,7 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
             continue;
         }
         flush_clipboards(&mut views, &mut io::stdout().lock())?;
-        if std::mem::take(&mut views[active].new_view) {
-            views[active].handle(Event::FocusLost);
-            let root = views[active].new_view_root.take();
-            views.push(App::new(Config::from_env(true), root));
-            active = views.len() - 1;
+        if open_new_view(&mut views, &mut active, |root| App::new(Config::from_env(true), root)) {
             dirty = true;
             continue;
         }
@@ -289,26 +364,35 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
                     && k.kind == KeyEventKind::Press
                     && k.code == KeyCode::F(8) && views[active].modal.is_none()
                 {
-                    views[active].handle(Event::FocusLost);
-                    active = if k.modifiers.contains(KeyModifiers::SHIFT) {
-                        (active + views.len() - 1) % views.len()
-                    } else {
-                        (active + 1) % views.len()
-                    };
-                    views[active].dispatch(code_core::session::Command::Recheck);
+                    let to = code_core::projects::Projects::with(views.len(), active, layout).step(!k.modifiers.contains(KeyModifiers::SHIFT));
+                    switch_project(&mut views, &mut active, to);
                     dirty = true;
                     continue;
                 }
+                if views.len() > 1 {
+                    match &event {
+                        Event::Mouse(mouse) => {
+                            dirty |= project_pointer(&mut views, &mut active, &mut layout, &mut coordinator, &geometry, *mouse);
+                            if views.is_empty() { return Ok(()); }
+                            continue;
+                        }
+                        // Every view lays itself out again, not only the one with the keys.
+                        Event::Resize(..) => for (i, view) in views.iter_mut().enumerate() { if i != active { view.handle(event.clone()); } },
+                        _ => {}
+                    }
+                }
                 dirty |= dispatch_input(&mut views, &mut active, &mut coordinator, event);
+                if views.is_empty() { return Ok(()); }
+                dirty |= project_request(&mut views, &mut active, &mut layout);
                 if views.is_empty() { return Ok(()); }
                 if views[active].pointer_text != pointer_text {
                     pointer_text = views[active].pointer_text;
                     pointer(&mut io::stdout(), pointer_text)?;
                 }
             }
-            Wake::Completion(i, c) => dirty |= views[i].apply(c) && i == active,
+            Wake::Completion(i, c) => dirty |= views[i].apply(c) && shown(i, active, &geometry),
             Wake::Theme(i, t) => {
-                dirty |= views[i].apply(Completion::Theme(Box::new(t))) && i == active
+                dirty |= views[i].apply(Completion::Theme(Box::new(t))) && shown(i, active, &geometry)
             }
             Wake::Closed => {
                 return Err(io::Error::new(
@@ -319,7 +403,7 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
             Wake::Tick => {
                 let now = std::time::Instant::now();
                 for (i, view) in views.iter_mut().enumerate() {
-                    dirty |= view.tick(now) && i == active;
+                    dirty |= view.tick(now) && shown(i, active, &geometry);
                 }
             }
         }
@@ -367,6 +451,136 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closing_an_unsaved_project_tab_asks_and_only_that_project_closes() {
+        use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let d = tempfile::tempdir().unwrap();
+        let mut views = Vec::new();
+        for name in ["alpha", "beta"] {
+            let root = d.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("a.txt"), b"saved\n").unwrap();
+            let mut app = super::App::new(crate::app::tests::config(&d.path().join(format!("{name}-state"))), Some(root.join("a.txt")));
+            crate::app::tests::settle(&mut app, |a| a.session.state().current_source().is_some());
+            app.enable_draft_input_for_test();
+            views.push(app);
+        }
+        let (mut active, mut layout) = (0usize, code_core::projects::Layout::Tabs);
+        let mut coordinator = code_core::close::CloseCoordinator::default();
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, crossterm::event::Event::Paste("x".into()));
+        assert!(views[0].session.project_dirty());
+        let mut geometry = crate::projects::Geometry::default();
+        let draw = |views: &mut Vec<super::App>, active: usize, layout: code_core::projects::Layout, geometry: &mut crate::projects::Geometry| {
+            let set = code_core::projects::Projects::with(views.len(), active, layout);
+            crate::projects::sync(views, &set);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 16)).unwrap();
+            terminal.draw(|f| crate::projects::draw(f, views, &set, geometry)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..16).map(|y| (0..100).map(|x| buffer[(x, y)].symbol().to_owned()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        assert!(draw(&mut views, active, layout, &mut geometry).lines().next().unwrap().contains(" ●"), "the strip marks unsaved work");
+        let close = geometry.tabs.iter().find(|(_, _, i)| *i == 0).unwrap().1;
+        let press = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: close, row: 0, modifiers: KeyModifiers::NONE };
+        super::project_pointer(&mut views, &mut active, &mut layout, &mut coordinator, &geometry, press);
+        assert!(draw(&mut views, active, layout, &mut geometry).contains("Unsaved changes"), "the project asks before closing");
+        // Escape keeps the project and the file; asked again, Discard closes it alone.
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(views.len(), 2);
+        assert_eq!(std::fs::read(d.path().join("alpha/a.txt")).unwrap(), b"saved\n");
+        draw(&mut views, active, layout, &mut geometry);
+        super::project_pointer(&mut views, &mut active, &mut layout, &mut coordinator, &geometry, press);
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Char('d'), KeyModifiers::NONE)));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while views.len() == 2 {
+            assert!(std::time::Instant::now() < until, "discard did not finish");
+            for view in views.iter_mut() { if let Ok(c) = view.session.completions().try_recv() { view.apply(c); } }
+            super::progress_closes(&mut views, &mut active, &mut coordinator);
+            std::thread::yield_now();
+        }
+        assert!(views[0].session.state().current_source().unwrap().source().ends_with("beta/a.txt"), "the other project remains");
+        assert_eq!(std::fs::read(d.path().join("alpha/a.txt")).unwrap(), b"saved\n");
+    }
+
+    #[test]
+    fn project_tabs_open_switch_go_side_by_side_and_close_through_real_input() {
+        use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use code_core::{projects::Layout, session::CommandId};
+        let d = tempfile::tempdir().unwrap();
+        let project = |name: &str| { let root = d.path().join(name); std::fs::create_dir_all(&root).unwrap(); std::fs::write(root.join(format!("{name}.txt")), name).unwrap(); root };
+        let (alpha, beta) = (project("alpha"), project("beta"));
+        let make = |root: Option<std::path::PathBuf>| {
+            let state = d.path().join(format!("state-{}", root.as_ref().and_then(|r| r.file_name()).map_or("none".into(), |n| n.to_string_lossy().into_owned())));
+            super::App::new(crate::app::tests::config(&state), root)
+        };
+        let mut views = vec![make(Some(alpha))];
+        crate::app::tests::settle(&mut views[0], |a| a.session.state().project().is_some());
+        let (mut active, mut layout) = (0usize, Layout::Tabs);
+        let mut coordinator = code_core::close::CloseCoordinator::default();
+        let mut geometry = crate::projects::Geometry::default();
+        let key = |code, mods| crossterm::event::Event::Key(KeyEvent::new(code, mods));
+        let screen = |views: &mut Vec<super::App>, active: usize, layout: Layout, geometry: &mut crate::projects::Geometry| {
+            let set = code_core::projects::Projects::with(views.len(), active, layout);
+            crate::projects::sync(views, &set);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 16)).unwrap();
+            terminal.draw(|f| crate::projects::draw(f, views, &set, geometry)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..16).map(|y| (0..100).map(|x| buffer[(x, y)].symbol().to_owned()).collect::<String>()).collect::<Vec<_>>()
+        };
+        // One project: drawn exactly as before, with no strip, and the project commands explain themselves.
+        let alone = screen(&mut views, active, layout, &mut geometry);
+        assert_eq!(alone.join("\n"), crate::app::tests::draw_screen(&mut views[0], 100, 16).chars().collect::<Vec<_>>().chunks(100).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("\n"));
+        assert_eq!(views[0].session.disabled(CommandId::NextProjectTab), Some("Only one project is open"));
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, key(super::KeyCode::Char(']'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        assert!(!super::project_request(&mut views, &mut active, &mut layout), "a disabled command asks nothing");
+        // Open Folder in New Project Tab: the menu command's prompt, the typed path, Enter.
+        views[0].run(CommandId::OpenFolderInProjectTab);
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, crossterm::event::Event::Paste(beta.display().to_string()));
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, key(super::KeyCode::Enter, KeyModifiers::NONE));
+        assert!(super::open_new_view(&mut views, &mut active, make));
+        assert_eq!((views.len(), active), (2, 1));
+        crate::app::tests::settle(&mut views[1], |a| a.session.state().project().is_some());
+        let tabs = screen(&mut views, active, layout, &mut geometry);
+        assert!(tabs[0].contains("1 alpha") && tabs[0].contains("2 beta") && tabs[0].contains("Side by Side"), "{:?}", tabs[0]);
+        assert_eq!(views[0].session.projects().count, 2);
+        // Ctrl+Alt+[ / ] step through the projects (IntelliJ's previous / next project window).
+        super::dispatch_input(&mut views, &mut active, &mut coordinator, key(super::KeyCode::Char('['), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        assert!(super::project_request(&mut views, &mut active, &mut layout));
+        assert_eq!(active, 0);
+        // The strip's layout button shows both projects side by side; a click in the right column gives it the keys.
+        let toggle = geometry.toggle.start;
+        let press = |column, row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
+        assert!(super::project_pointer(&mut views, &mut active, &mut layout, &mut coordinator, &geometry, press(toggle, 0)));
+        assert_eq!(layout, Layout::SideBySide);
+        let side = screen(&mut views, active, layout, &mut geometry);
+        assert_eq!(geometry.columns.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1]);
+        let (left, right_rect) = (geometry.column_of(0).unwrap(), geometry.column_of(1).unwrap());
+        let column_text = |r: ratatui::layout::Rect| side.iter().skip(1).map(|row| row.chars().skip(r.x as usize).take(r.width as usize).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(column_text(left).contains("alpha") && !column_text(left).contains("beta"), "{}", column_text(left));
+        assert!(column_text(right_rect).contains("beta") && !column_text(right_rect).contains("alpha"), "{}", column_text(right_rect));
+        assert!(side[0].contains("Tabs"));
+        let right = geometry.column_of(1).unwrap();
+        super::project_pointer(&mut views, &mut active, &mut layout, &mut coordinator, &geometry, press(right.x + 2, right.y + 3));
+        assert_eq!(active, 1);
+        assert_eq!(views[0].session.projects().layout, Layout::SideBySide);
+        // Tiny terminals: the strip and columns clip without panicking, and a project still gets the keys.
+        for (w, h) in [(12u16, 3u16), (5, 1), (1, 1), (100, 2), (40, 30)] {
+            let set = code_core::projects::Projects::with(views.len(), active, layout);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            let mut tiny = crate::projects::Geometry::default();
+            terminal.draw(|f| crate::projects::draw(f, &mut views, &set, &mut tiny)).unwrap();
+            assert!(tiny.columns.len() <= 1 || w >= 2 * code_core::projects::MIN_COLUMN_CELLS as u16, "{w}x{h}: {:?}", tiny.columns);
+            assert!(tiny.columns.iter().all(|(_, r)| r.right() <= w && r.bottom() <= h));
+        }
+        screen(&mut views, active, layout, &mut geometry);
+        // The second project's close mark closes it (nothing unsaved); one project returns to the plain layout.
+        let close = geometry.tabs.iter().find(|(_, _, i)| *i == 1).unwrap().1;
+        assert!(super::project_pointer(&mut views, &mut active, &mut layout, &mut coordinator, &geometry, press(close, 0)));
+        assert_eq!((views.len(), active), (1, 0));
+        let after = screen(&mut views, active, layout, &mut geometry);
+        assert!(!after[0].contains("Side by Side"), "no strip with one project");
+        assert_eq!(views[0].session.projects().count, 1);
+    }
+
     #[test]
     fn runtime_quit_all_waits_for_every_independent_draft_decision() {
         use crossterm::event::{KeyEvent, KeyModifiers};

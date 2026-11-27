@@ -458,6 +458,10 @@ impl Session {
             self.state.messages.push(format!("Code completion: {OVERLAP}; nothing was inserted"));
             return repaint;
         }
+        if let Some(why) = doc.and_then(|d| d.erb_tag_refusal(&edits)) {
+            self.state.messages.push(format!("Code completion: {why}; nothing was inserted"));
+            return repaint;
+        }
         if item.snippet.is_none() && let Some(projection) = doc.and_then(Document::embedded)
             && let Err(why) = projection.check(&edits, typed, &|r| snapshot.range(r).map(std::borrow::Cow::into_owned))
         {

@@ -35,6 +35,8 @@ mod diagnostics_work;
 mod format_work;
 #[path = "session/json.rs"]
 mod json;
+#[path = "session/xml_format.rs"]
+mod xml_format;
 pub use format_work::{FormatKind, ToolResult};
 #[path = "session/server_command.rs"]
 mod server_command;
@@ -537,6 +539,13 @@ pub enum Command {
     CancelProjectSyntax,
     /// Format the active document, or organize its imports, through its language server (one undoable edit).
     Format(FormatKind),
+    /// Move the start screen's keyboard selection to the next (or previous) item, wrapping.
+    StepStart { forward: bool },
+    /// Read the recent projects' git branches again (Open Recent Project is about to show them).
+    RefreshRecentBranches,
+    /// Open a project chosen from a list: here, or ask where when this tab has another one open.
+    OpenProject(PathBuf),
+    ChooseOpenProject { ticket: u64, choice: crate::projects::OpenChoice },
     /// Save without the project's format-on-save.
     SaveWithoutFormatting { tab: TabId },
     /// Move the popup's selection by rows (wrapping), or to a row.
@@ -755,6 +764,16 @@ pub enum CommandId {
     CloseTabsLeft,
     CloseTabsRight,
     CloseWindow,
+    /// A new project tab in this window, on the start screen (the adapter's host opens it).
+    NewProjectTab,
+    /// Choose a folder and open it in a new project tab (the adapter asks which).
+    OpenFolderInProjectTab,
+    /// Close this project's tab, asking about its unsaved work; the last project closes the window.
+    CloseProjectTab,
+    NextProjectTab,
+    PreviousProjectTab,
+    /// Show every project that fits side by side, or one at a time as tabs.
+    ProjectsSideBySide,
     QuitAll,
     SelectAll,
     Copy,
@@ -870,6 +889,8 @@ pub enum CommandId {
     CancelProjectSyntax,
     /// The language server formats the whole file, as one undoable edit.
     FormatDocument,
+    /// Format the selected JSON or XML alone (Format Document runs it while such a selection is active).
+    FormatSelection,
     /// The language server's organize-imports action for the file.
     OrganizeImports,
     /// Save, skipping the project's format-on-save.
@@ -1036,7 +1057,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 268] = [
+    pub const ALL: [CommandId; 275] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -1094,6 +1115,12 @@ impl CommandId {
         Self::CloseTabsLeft,
         Self::CloseTabsRight,
         Self::CloseWindow,
+        Self::NewProjectTab,
+        Self::OpenFolderInProjectTab,
+        Self::CloseProjectTab,
+        Self::NextProjectTab,
+        Self::PreviousProjectTab,
+        Self::ProjectsSideBySide,
         Self::QuitAll,
         Self::SelectAll,
         Self::Copy,
@@ -1183,6 +1210,7 @@ impl CommandId {
         Self::CheckProjectSyntax,
         Self::CancelProjectSyntax,
         Self::FormatDocument,
+        Self::FormatSelection,
         Self::OrganizeImports,
         Self::SaveWithoutFormatting,
         Self::AutoCompletion,
@@ -1373,6 +1401,12 @@ impl CommandId {
             Self::CloseTabsLeft => "Close Tabs to Left",
             Self::CloseTabsRight => "Close Tabs to Right",
             Self::CloseWindow => "Close Window",
+            Self::NewProjectTab => "New Project Tab",
+            Self::OpenFolderInProjectTab => "Open Folder in New Project Tab…",
+            Self::CloseProjectTab => "Close Project Tab",
+            Self::NextProjectTab => "Next Project Tab",
+            Self::PreviousProjectTab => "Previous Project Tab",
+            Self::ProjectsSideBySide => "Projects Side by Side",
             Self::QuitAll => "Quit All Windows",
             Self::SelectAll => "Select All",
             Self::Copy => "Copy",
@@ -1465,6 +1499,7 @@ impl CommandId {
             Self::CheckProjectSyntax => "Check Project Syntax",
             Self::CancelProjectSyntax => "Cancel Project Syntax Check",
             Self::FormatDocument => "Format Document",
+            Self::FormatSelection => "Format Selection",
             Self::OrganizeImports => "Organize Imports",
             Self::SaveWithoutFormatting => "Save Without Formatting",
             Self::AutoCompletion => "Completion While Typing",
@@ -1575,7 +1610,7 @@ impl StartItem {
     pub fn heading(&self) -> Option<&'static str> {
         match self {
             Self::Command(_) => None,
-            Self::RecentFolder(_) => Some("Recent folders"),
+            Self::RecentFolder(_) => Some("Recent projects"),
             Self::RecentFile(_) => Some("Recent files"),
         }
     }
@@ -1634,6 +1669,8 @@ pub enum Completion {
     ArchiveSaved(Box<archive_save_work::Saved>),
     ArchiveRechecked(Box<archive_save_work::Rechecked>),
     ArchiveRecovered { ticket: u64, result: Result<Document, String> },
+    /// The recent projects' git branches, read off the UI thread.
+    RecentBranches(Vec<(PathBuf, Option<String>)>),
     TerminalStarted { id: crate::terminal::Id, generation: u64, result: Result<crate::terminal::Process, String> },
     TerminalWake { id: crate::terminal::Id, generation: u64 },
     ExplorerCopied { request: u64, result: Result<(), String> },
@@ -1804,6 +1841,7 @@ impl Input {
                 Completion::ArchiveRechecked(..) => "archive-rechecked",
                 Completion::ArchiveRecovered { .. } => "archive-recovered",
                 Completion::TerminalStarted { .. } | Completion::TerminalWake { .. } => "terminal",
+                Completion::RecentBranches(_) => "recent branches",
                 Completion::ExplorerCopied { .. } => "explorer copy",
                 Completion::FileClipboard { .. } => "file clipboard",
                 Completion::ClipboardTextReady { .. } => "text clipboard",
@@ -1917,6 +1955,10 @@ pub struct Effect {
 
 /// The state adapters present.
 pub struct State {
+    /// The start screen's keyboard selection (see [`State::start_selected`]).
+    start_selected: usize,
+    /// The git branch of each recent project, as last read off the UI thread.
+    recent_branches: std::collections::HashMap<PathBuf, String>,
     terminal: crate::terminal::State,
     presentation: Option<Box<presentation::Presentation>>,
     comparison: Option<SavedComparison>,
@@ -2627,8 +2669,12 @@ impl State {
         if self.has_tree() || !self.tabs.is_empty() || self.loading.is_some() {
             return Vec::new();
         }
-        [CommandId::Open, CommandId::OpenFolder].into_iter().map(StartItem::Command).chain(self.recent.iter().cloned().map(StartItem::RecentFolder))
+        [CommandId::OpenFolder, CommandId::OpenFolderInProjectTab, CommandId::Open, CommandId::NewDocument].into_iter().map(StartItem::Command).chain(self.recent.iter().cloned().map(StartItem::RecentFolder))
             .chain(self.recent_alone.iter().cloned().map(StartItem::RecentFile)).collect()
+    }
+    /// The start item the keys have chosen (Up/Down move it, Enter runs it), within the items there are.
+    pub fn start_selected(&self) -> usize {
+        self.start_selected.min(self.recent.len() + self.recent_alone.len() + 3)
     }
     /// The tree lists each folder's folders before its files.
     pub fn folders_first(&self) -> bool {
@@ -3134,6 +3180,17 @@ pub struct Session {
     closing: Option<close_work::Pending>,
     closed: bool,
     last_close: Option<crate::close::Committed>,
+    /// The window's project tabs as its host last reported them.
+    pub(crate) projects_info: crate::projects::Info,
+    /// What the last caret-only Copy or Cut took: whole lines, pasted above the caret's line when pasted back.
+    pub(crate) line_clipboard: Option<String>,
+    /// Where to open a chosen project, while asked (see [`crate::projects::OpenPrompt`]), and its tickets.
+    pub(crate) open_prompt: Option<crate::projects::OpenPrompt>,
+    pub(crate) open_project_seq: u64,
+    /// A project the user chose to open in a new project tab, for the adapter's host.
+    pub(crate) project_tab_request: Option<PathBuf>,
+    /// Shortcut labels spelled as on macOS (see [`Session::set_mac_shortcuts`]).
+    mac_shortcuts: bool,
     state: State,
     cache: InactiveCache,
     index_cache_dir: PathBuf,
@@ -3405,7 +3462,7 @@ impl Session {
         // Recovered drafts live in the reader's own cache, outside every checkout.
         let recovery_dir = config.cache.join("recovery");
         let recovery = crate::recovery::Recovery::open(recovery_dir.clone());
-        Self {
+        let mut session = Self {
             shown_position: Default::default(),
             maven_files: Default::default(),
             maven_sources: Default::default(),
@@ -3413,8 +3470,10 @@ impl Session {
             text_input_enabled,
             vim_group_edit: false,
             comparison_seq: 0,
-            id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, reconcile_seq: 0, reconcile: None, close_seq: 0, closing: None, closed: false, last_close: None,
+            id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, reconcile_seq: 0, reconcile: None, close_seq: 0, closing: None, closed: false, last_close: None, projects_info: crate::projects::Info { count: 1, position: 0, layout: crate::projects::Layout::Tabs }, mac_shortcuts: false, line_clipboard: None, open_prompt: None, open_project_seq: 0, project_tab_request: None,
             state: State {
+                start_selected: 0,
+                recent_branches: Default::default(),
                 terminal: crate::terminal::State::default(),
                 presentation: None,
                 comparison: None,
@@ -3610,7 +3669,10 @@ impl Session {
             markers_debounce,
             tx,
             rx,
-        }
+        };
+        // The welcome screen and Open Recent Project show each recent project's branch: read off the UI thread.
+        session.refresh_recent_branches();
+        session
     }
 
     pub fn state(&self) -> &State {
@@ -3691,6 +3753,7 @@ impl Session {
     /// Toggle `id`'s state for the menus (`None`: not a toggle): a setting, or a find option (the session's, which the
     /// active tab's find uses).
     fn on(&self, id: CommandId) -> Option<bool> {
+        if id == CommandId::ProjectsSideBySide { return Some(self.projects_info.layout == crate::projects::Layout::SideBySide); }
         let o = self.find_options;
         match id {
             CommandId::KeymapIntelliJ => Some(self.state.settings.keymap == KeymapPreset::IntelliJ),
@@ -3715,8 +3778,8 @@ impl Session {
             return Some("This action requires a file on disk; the current document is an archive entry");
         }
         if self.state.active().is_some_and(|tab| tab.csv.is_some()) && matches!(id,
-            CommandId::Cut | CommandId::Paste | CommandId::Delete | CommandId::SelectAll | CommandId::ExtendSelection | CommandId::ShrinkSelection | CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections | CommandId::IndentSelection | CommandId::OutdentSelection | CommandId::ToggleComment | CommandId::MoveLinesUp | CommandId::MoveLinesDown | CommandId::DuplicateLinesUp | CommandId::DuplicateLinesDown | CommandId::DeleteLine | CommandId::Completion | CommandId::FormatDocument | CommandId::OrganizeImports | CommandId::QuickFix | CommandId::ReplaceMatch | CommandId::ReplaceAll) { return Some("Use CSV cell editing or switch to Source"); }
-        if self.csv_pending() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
+            CommandId::Cut | CommandId::Paste | CommandId::Delete | CommandId::SelectAll | CommandId::ExtendSelection | CommandId::ShrinkSelection | CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections | CommandId::IndentSelection | CommandId::OutdentSelection | CommandId::ToggleComment | CommandId::MoveLinesUp | CommandId::MoveLinesDown | CommandId::DuplicateLinesUp | CommandId::DuplicateLinesDown | CommandId::DeleteLine | CommandId::Completion | CommandId::FormatDocument | CommandId::FormatSelection | CommandId::OrganizeImports | CommandId::QuickFix | CommandId::ReplaceMatch | CommandId::ReplaceAll) { return Some("Use CSV cell editing or switch to Source"); }
+        if self.csv_pending() && id.project_action().is_none() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
         if (self.state.runtime_saving.is_some() || self.state.provider_saves > 0 || self.install_running.is_some()) && matches!(id,
             CommandId::InstallServer | CommandId::StartServerInstall | CommandId::ServerRuntime | CommandId::MavenProfiles | CommandId::IncludeInBuild | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
             | CommandId::TrustProjectTools | CommandId::UntrustProjectTools | CommandId::FolderTrust
@@ -4000,6 +4063,11 @@ impl Session {
                 }
                 _ => None,
             },
+            CommandId::NewProjectTab | CommandId::OpenFolderInProjectTab | CommandId::CloseProjectTab | CommandId::NextProjectTab | CommandId::PreviousProjectTab | CommandId::ProjectsSideBySide => id.project_action().and_then(|action| self.project_disabled(action)),
+            CommandId::FormatSelection => self.format_selection_disabled(),
+            // With well-formed JSON or XML selected, Format Document formats the selection (as IntelliJ's Reformat Code
+            // does); any other selection leaves it formatting the file.
+            CommandId::FormatDocument if self.format_selection_routes() => None,
             CommandId::TrustProjectTools | CommandId::UntrustProjectTools | CommandId::FolderTrust => match self.folder_trust() {
                 None => Some("No folder is open: open the project's folder to trust its tools"),
                 Some(trust) if (trust == semantics::provider::Trust::Trusted) == (id != CommandId::UntrustProjectTools) => {
@@ -4026,6 +4094,9 @@ impl Session {
             // Python, shell scripts and ERB templates format through the project's own formatter, whatever their language
             // server's state.
             CommandId::OrganizeImports if current.as_ref().is_some_and(|d| d.language() == Some(Language::Json)) => Some("JSON has no imports to organize"),
+            CommandId::OrganizeImports if current.as_ref().is_some_and(|d| d.language() == Some(Language::Xml)) => Some("XML has no imports to organize"),
+            // A plain-text document holding JSON or XML formats as that, offline.
+            CommandId::FormatDocument if current.as_deref().and_then(format_work::plain_structured).is_some() => None,
             CommandId::FormatDocument | CommandId::OrganizeImports if current.as_deref().is_some_and(format_work::project_formats) => match current.as_ref() {
                 _ if self.state.active().is_some_and(|t| t.retrieved.is_some()) => Some("Not available in source a language server returned"),
                 Some(d) if d.is_large() => Some("Large file: not formatted"),
@@ -6099,15 +6170,23 @@ impl Session {
                 let Some(view) = self.state.active().and_then(|t| self.state.view(t.id)) else { return Effect::default() };
                 let doc = view.snapshot();
                 let selections: Vec<_> = view.tab().selections().collect();
+                // Carets alone copy their whole lines (each once, with its ending), which paste back as lines.
+                if !selections.is_empty() && selections.iter().all(|s| s.range().is_empty()) {
+                    let mut lines: Vec<usize> = selections.iter().map(|s| doc.line_of(s.head)).collect();
+                    lines.sort_unstable();
+                    lines.dedup();
+                    let text: String = lines.into_iter().filter_map(|l| doc.line_with_ending(l)).filter_map(|r| doc.copy_range(r)).collect();
+                    self.line_clipboard = (!text.is_empty()).then(|| text.clone());
+                    return Effect { repaint: false, copy: (!text.is_empty()).then_some(text), ..Effect::default() };
+                }
+                self.line_clipboard = None;
                 // Several selections copy one per line, as Cut does; an empty one contributes nothing.
                 if selections.len() > 1 {
                     let text = selections.iter().filter(|s| !s.range().is_empty()).filter_map(|s| doc.copy_range(s.range())).collect::<Vec<_>>().join("\n");
                     return Effect { repaint: false, copy: (!text.is_empty()).then_some(text), ..Effect::default() };
                 }
                 let Some(s) = selections.first().copied() else { return Effect::default() };
-                // No selection: the caret's visible line with its original ending.
-                let range = if s.range().is_empty() { doc.line_with_ending(doc.line_of(s.head)).unwrap_or(0..0) } else { s.range() };
-                Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.copy_range(range)).flatten(), ..Effect::default() }
+                Effect { repaint: false, copy: doc.copy_range(s.range()), ..Effect::default() }
             }
             Command::Scroll(top) => {
                 let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
@@ -6234,6 +6313,16 @@ impl Session {
             Command::CheckProjectSyntax => self.check_project_syntax(),
             Command::CancelProjectSyntax => self.cancel_project_syntax("Cancelled"),
             Command::Format(kind) => match self.state.active { Some(tab) => self.format_document(tab, kind, false), None => Effect::default() },
+            Command::RefreshRecentBranches => { self.refresh_recent_branches(); Effect::default() }
+            Command::OpenProject(root) => self.open_project(root),
+            Command::ChooseOpenProject { ticket, choice } => self.choose_open_project(ticket, choice),
+            Command::StepStart { forward } => {
+                let count = self.state.start_items().len();
+                if count == 0 { return Effect::default(); }
+                let at = self.state.start_selected().min(count - 1);
+                self.state.start_selected = if forward { (at + 1) % count } else { (at + count - 1) % count };
+                Effect { repaint: true, ..Effect::default() }
+            }
             Command::SaveWithoutFormatting { tab } => self.save(tab),
             Command::MoveCompletion(by) => self.move_completion(by),
             Command::SelectCompletion(row) => self.select_completion(row),
@@ -7507,6 +7596,15 @@ impl Session {
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ProjectFormatted { request, result } => self.project_formatted(request, result),
+            Completion::RecentBranches(found) => {
+                for (root, branch) in found {
+                    match branch { Some(b) => { self.state.recent_branches.insert(root, b); } None => { self.state.recent_branches.remove(&root); } }
+                }
+                // Only the roots still recent are kept.
+                let recent = &self.state.recent;
+                self.state.recent_branches.retain(|root, _| recent.contains(root));
+                Effect { repaint: true, ..Effect::default() }
+            }
             Completion::Sql(reply) => self.sql_reply(*reply),
             Completion::SqlMetadata { request, result } => self.sql_metadata_reply(request, result),
             Completion::ServerRuntimeSaved { request, kind, result } => {
@@ -9496,6 +9594,7 @@ impl Session {
         self.state.recent.retain(|r| *r != root);
         self.state.recent.insert(0, root.clone());
         self.state.recent.truncate(RECENT_ROOTS);
+        self.refresh_recent_branches();
         let (latest, tx) = (self.root_generation.clone(), self.tx.clone());
         let (recent, file) = (self.state.recent.clone(), self.recent_file.clone());
         self.recent_seq += 1;
@@ -10686,7 +10785,36 @@ impl Session {
 
     /// The keys a menu shows for `id`: its keymap chords, or the fixed editing key adapters map as text input.
     pub fn key_hint(&self, id: CommandId) -> Option<String> {
-        self.keymap.hint(id).or_else(|| id.input_hint().map(str::to_owned))
+        let hint = self.keymap.hint(id).or_else(|| id.input_hint().map(str::to_owned))?;
+        Some(if self.mac_shortcuts { keymap::mac_spelling(&hint) } else { hint })
+    }
+
+    /// Spell shortcut labels as macOS does (`Cmd+Opt+L`): the desktop adapter on macOS, where the Command key is the
+    /// primary modifier. Terminals keep `Ctrl`: they receive Control, never Command.
+    pub fn set_mac_shortcuts(&mut self, on: bool) { self.mac_shortcuts = on; }
+
+    /// The platform's primary modifier as labels spell it.
+    pub fn primary_modifier(&self) -> &'static str { if self.mac_shortcuts { "Cmd" } else { "Ctrl" } }
+
+    /// The welcome screen's tip, with the project-tab keys as this keymap and platform spell them.
+    pub fn welcome_tip(&self) -> String {
+        crate::start::tip(self.key_hint(CommandId::NextProjectTab).as_deref(), self.key_hint(CommandId::PreviousProjectTab).as_deref())
+    }
+
+    /// The recent projects Open Recent Project lists for `query`, with the branches last read for them.
+    pub fn recent_projects(&self, query: &str) -> Vec<crate::start::RecentProject> {
+        let branches = &self.state.recent_branches;
+        crate::start::recent_projects(&self.state.recent, query, crate::start::home().as_deref(), |p| branches.get(p).cloned())
+    }
+
+    /// Read the recent projects' git branches off the UI thread (they arrive as [`Completion::RecentBranches`]).
+    pub(crate) fn refresh_recent_branches(&mut self) {
+        let (roots, tx) = (self.state.recent.clone(), self.tx.clone());
+        if roots.is_empty() { return; }
+        self.jobs.submit(Priority::Background, move || {
+            let found = roots.into_iter().map(|root| { let branch = crate::start::git_branch(&root); (root, branch) }).collect();
+            let _ = tx.send_blocking(Completion::RecentBranches(found));
+        });
     }
 
     /// The command this key press runs under the current keymap, if any.

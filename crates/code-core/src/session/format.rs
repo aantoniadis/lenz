@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormatKind {
     Format,
+    /// Format only the primary selection, as JSON or XML (by the file's type, else by what the selection holds).
+    Selection,
     OrganizeImports,
 }
 
@@ -21,12 +23,13 @@ impl FormatKind {
     fn label(self) -> &'static str {
         match self {
             FormatKind::Format => "Format Document",
+            FormatKind::Selection => "Format Selection",
             FormatKind::OrganizeImports => "Organize Imports",
         }
     }
     fn question(self) -> semantics::Question {
         match self {
-            FormatKind::Format => semantics::Question::Formatting,
+            FormatKind::Format | FormatKind::Selection => semantics::Question::Formatting,
             FormatKind::OrganizeImports => semantics::Question::OrganizeImports,
         }
     }
@@ -34,7 +37,8 @@ impl FormatKind {
 
 /// The request being answered; `save` when Save waits for it; `tool` when the project's formatter runs instead of
 /// the language server.
-pub(super) struct FormatRequest { request: u64, tab: TabId, source: SemanticSource, doc: Option<Arc<Document>>, kind: FormatKind, save: bool, tool: bool, cancelled: Arc<AtomicBool> }
+/// `range`: the selection Format Selection formats (byte offsets of the version asked about).
+pub(super) struct FormatRequest { request: u64, tab: TabId, source: SemanticSource, doc: Option<Arc<Document>>, kind: FormatKind, save: bool, tool: bool, range: Option<std::ops::Range<usize>>, cancelled: Arc<AtomicBool> }
 
 impl Drop for FormatRequest {
     fn drop(&mut self) { self.cancelled.store(true, Ordering::Relaxed); }
@@ -84,6 +88,7 @@ impl FormatRequest {
         match (self.kind, self.save) {
             (FormatKind::Format, true) => "Formatting before saving".into(),
             (FormatKind::Format, false) => "Formatting".into(),
+            (FormatKind::Selection, _) => "Formatting the selection".into(),
             (FormatKind::OrganizeImports, _) => "Organizing imports".into(),
         }
     }
@@ -101,22 +106,28 @@ impl Session {
     fn format_on_save(&self, tab: TabId) -> bool {
         let Some(view) = self.state.view(tab) else { return false };
         if view.snapshot().language() == Some(Language::Env) { return false; }
+        // YAML that Rails reads through ERB: its server formats the masked copy, and an edit reaching a tag would be
+        // refused, leaving the file unsaved; Save writes it as typed (Format Document still offers to format it).
+        if view.snapshot().language() == Some(Language::Yaml) && !view.snapshot().is_large()
+            && view.snapshot().copy_range(0..view.snapshot().len_bytes()).is_some_and(|text| !lenz_content::highlight::yaml_erb_tags(&text).is_empty()) { return false; }
         let in_project = self.state.project.as_ref().is_some_and(|p| view.snapshot().source().starts_with(p.root()));
         in_project && self.state.project_preferences().is_some_and(|p| p.format_on_save)
     }
 
     /// Ask `tab`'s server to format the document or organize its imports (`save`: then write it).
     pub(super) fn format_document(&mut self, tab: TabId, kind: FormatKind, save: bool) -> Effect {
-        let id = match kind { FormatKind::Format => CommandId::FormatDocument, FormatKind::OrganizeImports => CommandId::OrganizeImports };
+        let id = match kind { FormatKind::Format => CommandId::FormatDocument, FormatKind::Selection => CommandId::FormatSelection, FormatKind::OrganizeImports => CommandId::OrganizeImports };
         if !save && let Some(why) = self.disabled(id) { return self.format_message(kind, why); }
         let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return Effect::default() };
-        let tool = project_formats(&snapshot);
+        // A plain-text document holding JSON or XML formats as that only when asked: Save never guesses.
+        let tool = project_formats(&snapshot) || kind == FormatKind::Selection || (!save && plain_structured(&snapshot).is_some());
+        let range = (kind == FormatKind::Selection).then(|| self.state.view(tab).and_then(|v| v.tab().selection()).map(|s| s.range())).flatten();
         self.cancel_format();
         if !tool { self.sync_semantics(); }
         self.semantic_seq += 1;
         let request = self.semantic_seq;
         self.semantic_wait.remove(&semantics::Lane::Format);
-        self.state.formatting = Some(FormatRequest { request, tab, source: SemanticSource::new(&snapshot), doc: None, kind, save, tool, cancelled: Arc::new(AtomicBool::new(false)) });
+        self.state.formatting = Some(FormatRequest { request, tab, source: SemanticSource::new(&snapshot), doc: None, kind, save, tool, range, cancelled: Arc::new(AtomicBool::new(false)) });
         let Some(doc) = self.admitted_document(tab, Priority::Visible) else {
             self.defer_semantic(tab, request, 0, kind.question(), None);
             return Effect { repaint: true, ..Effect::default() };
@@ -133,7 +144,7 @@ impl Session {
         if tool { return self.run_project_formatter(doc, request, kind); }
         let unit = self.indent_unit();
         let extra = match kind {
-            FormatKind::Format => serde_json::json!({ "options": { "tabSize": unit.width, "insertSpaces": unit.style == crate::preferences::Style::Space } }),
+            FormatKind::Format | FormatKind::Selection => serde_json::json!({ "options": { "tabSize": unit.width, "insertSpaces": unit.style == crate::preferences::Style::Space } }),
             FormatKind::OrganizeImports => serde_json::Value::Null,
         };
         match self.state.semantics.ask_with(&doc, 0, request, kind.question(), extra) {
@@ -149,14 +160,21 @@ impl Session {
         let (settings, tx) = (self.state.semantics.settings().clone(), self.tx.clone());
         let organize = kind == FormatKind::OrganizeImports;
         let job = doc.clone();
-        if doc.language() == Some(Language::Json) {
+        let selection = self.state.formatting.as_ref().and_then(|f| f.range.clone());
+        let structured = structured(doc.language(), doc.source(), doc.text());
+        if kind == FormatKind::Selection || structured.is_some() {
             let preference = project.as_ref().and(self.state.project_preferences()).and_then(|p| p.indent);
-            let resolved = crate::preferences::resolve(doc.source(), preference, doc.language());
+            let resolved = crate::preferences::resolve(doc.source(), preference, doc.language().or(structured.map(Structured::language)));
             let unit = crate::edit_ops::IndentUnit::new(resolved.style.0, resolved.size.0, resolved.tab_width.0);
             let Some(cancelled) = self.state.formatting.as_ref().map(|f| f.cancelled.clone()) else { return Effect::default() };
             self.jobs.submit(Priority::Visible, move || {
-                let result = if organize { ToolResult::Unavailable("JSON has no imports to organize".into()) }
-                    else { json::format(&job, &unit, &cancelled) };
+                let result = match (kind, structured, selection) {
+                    (FormatKind::Selection, _, Some(range)) => format_selection(&job, range, &unit, &cancelled),
+                    (FormatKind::Selection, _, None) => ToolResult::Failed("select the text to format first".into()),
+                    (FormatKind::OrganizeImports, Some(s), _) => ToolResult::Unavailable(format!("{} has no imports to organize", s.name())),
+                    (_, Some(Structured::Xml), _) => xml_format::format(&job, &unit, &cancelled),
+                    _ => json::format(&job, &unit, &cancelled),
+                };
                 let _ = tx.send_blocking(Completion::ProjectFormatted { request, result });
             });
             if let Some(f) = self.state.formatting.as_mut() { f.doc = Some(doc); }
@@ -288,8 +306,8 @@ impl Session {
             Err(why) => return refuse(self, &why),
         };
         let edits = match f.kind {
-            FormatKind::Format if value.is_null() => Ok((Vec::new(), None)),
-            FormatKind::Format => code_action::text_edits(&value, &doc, reply.encoding).and_then(code_action::sorted).map(|e| (e, None)).map_err(str::to_owned),
+            FormatKind::Format | FormatKind::Selection if value.is_null() => Ok((Vec::new(), None)),
+            FormatKind::Format | FormatKind::Selection => code_action::text_edits(&value, &doc, reply.encoding).and_then(code_action::sorted).map(|e| (e, None)).map_err(str::to_owned),
             FormatKind::OrganizeImports => organize(&value, &doc, reply.encoding, &|c: &str| self.state.semantics.runs_command(reply.session, c)),
         };
         let (edits, command) = match edits {
@@ -317,7 +335,128 @@ impl Session {
 /// does not format, shell scripts, which shfmt formats as the shell Lenz identifies, and ERB templates (erb_lint).
 /// JSON uses Lenz's source-preserving offline whitespace formatter.
 pub(super) fn project_formats(snapshot: &crate::text::TextSnapshot) -> bool {
-    matches!(snapshot.language(), Some(Language::Python | Language::Bash | Language::Sql | Language::Json)) || erb(snapshot.source()) || crate::template::Kind::of(snapshot.source()) == Some(crate::template::Kind::Haml)
+    matches!(snapshot.language(), Some(Language::Python | Language::Bash | Language::Sql | Language::Json | Language::Xml)) || erb(snapshot.source()) || crate::template::Kind::of(snapshot.source()) == Some(crate::template::Kind::Haml)
+}
+
+/// A data format Lenz formats itself, offline, changing only whitespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Structured { Json, Xml }
+
+impl Structured {
+    pub(super) fn name(self) -> &'static str { match self { Structured::Json => "JSON", Structured::Xml => "XML" } }
+    fn language(self) -> Language { match self { Structured::Json => Language::Json, Structured::Xml => Language::Xml } }
+    /// What `text` looks like from its first non-blank character: a guess the formatter then checks in full.
+    pub(super) fn sniff(text: &str) -> Option<Self> {
+        match text.trim_start().as_bytes().first()? {
+            b'{' | b'[' => Some(Structured::Json),
+            b'<' => Some(Structured::Xml),
+            _ => None,
+        }
+    }
+}
+
+/// How a whole document formats offline: a JSON or XML file, or a plain-text one (an untitled document, a `.txt`)
+/// whose text starts like JSON or XML. A template (ERB, Haml) is never plain text: it has its own formatter.
+pub(super) fn structured(language: Option<Language>, file: &Path, text: &str) -> Option<Structured> {
+    match language {
+        Some(Language::Json) => Some(Structured::Json),
+        Some(Language::Xml) => Some(Structured::Xml),
+        None if crate::template::Kind::of(file).is_none() => Structured::sniff(text),
+        _ => None,
+    }
+}
+
+/// [`structured`] for a plain-text snapshot, reading only its start.
+pub(super) fn plain_structured(snapshot: &crate::text::TextSnapshot) -> Option<Structured> {
+    if snapshot.language().is_some() || snapshot.is_large() || crate::template::Kind::of(snapshot.source()).is_some() { return None; }
+    let mut end = snapshot.len_bytes().min(4096);
+    let head = loop {
+        if let Some(head) = snapshot.copy_range(0..end) { break head; }
+        if end == 0 { return None; }
+        end -= 1;
+    };
+    Structured::sniff(&head)
+}
+
+/// What Format Selection formats `selected` as: the file's own JSON or XML, else what the selection starts like.
+pub(super) fn selection_structured(language: Option<Language>, selected: &str) -> Option<Structured> {
+    match language {
+        Some(Language::Json) => Some(Structured::Json),
+        Some(Language::Xml) => Some(Structured::Xml),
+        Some(Language::Env) => None,
+        _ => Structured::sniff(selected),
+    }
+}
+
+/// Format `range` of `doc` alone: its text without surrounding blanks is formatted as JSON or XML, and every line
+/// after the first is indented like the line the selection starts on, so the value sits where it was pasted.
+pub(super) fn format_selection(doc: &Document, range: std::ops::Range<usize>, unit: &crate::edit_ops::IndentUnit, cancelled: &AtomicBool) -> ToolResult {
+    let text = doc.text();
+    let Some(selected) = text.get(range.clone()) else { return ToolResult::Failed("the selection is not in the text".into()) };
+    let start = range.start + (selected.len() - selected.trim_start().len());
+    let end = range.end - (selected.len() - selected.trim_end().len());
+    if start >= end { return ToolResult::Failed("the selection holds only blanks".into()); }
+    let core = text.get(start..end).unwrap_or_default();
+    let Some(kind) = selection_structured(doc.language(), core) else { return ToolResult::Failed("the selection is not JSON or XML".into()) };
+    let line_start = text.get(..start).and_then(|before| before.rfind(['\n', '\r'])).map_or(0, |i| i + 1);
+    let base: String = text.get(line_start..start).unwrap_or_default().chars().take_while(|c| matches!(c, ' ' | '\t')).collect();
+    let ending = xml_format::first_ending(text).unwrap_or("\n");
+    let formatted = match kind {
+        Structured::Json => json::whitespace_with(core, &unit.text, ending, cancelled).map_err(|why| (false, format!("invalid JSON or not formatted: {why}"))),
+        Structured::Xml => xml_format::whitespace(core, &unit.text, ending, cancelled).map_err(|why| (matches!(why, xml_format::Refusal::Unsupported(_)), why.to_string())),
+    };
+    let formatted = match formatted {
+        Ok(text) => text,
+        Err((true, why)) => return ToolResult::Unavailable(format!("{} formatting: {why}", kind.name())),
+        Err((false, why)) => return ToolResult::Failed(format!("{} formatting: {}", kind.name(), why.strip_prefix("invalid JSON or not formatted: ").unwrap_or(&why))),
+    };
+    let mut placed = String::with_capacity(formatted.len() + base.len() * 8);
+    for (i, line) in formatted.split_inclusive('\n').enumerate() {
+        if i > 0 && !line.trim().is_empty() { placed.push_str(&base); }
+        placed.push_str(line);
+    }
+    let tool = match kind { Structured::Json => "Lenz JSON formatter", Structured::Xml => "Lenz XML formatter" };
+    ToolResult::Formatted { tool, edit: difference(core, placed).map(|e| TextEdit { range: e.range.start + start..e.range.end + start, text: e.text }) }
+}
+
+/// The largest selection Format Document checks before formatting it alone (larger ones format the document).
+const ROUTE_LIMIT: usize = 256 << 10;
+
+impl Session {
+    /// Whether Format Document (Ctrl+Alt+L) formats the selection alone: it holds well-formed JSON or XML. Anything
+    /// else leaves Format Document formatting the whole file as it always has.
+    pub(crate) fn format_selection_routes(&self) -> bool {
+        if self.format_selection_disabled().is_some() { return false; }
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id)) else { return false };
+        let Some(range) = view.tab().selection().map(|s| s.range()).filter(|r| r.len() <= ROUTE_LIMIT) else { return false };
+        let Some(text) = view.snapshot().copy_range(range) else { return false };
+        let core = text.trim();
+        match selection_structured(view.snapshot().language(), core) {
+            Some(Structured::Json) => serde_json::from_str::<serde::de::IgnoredAny>(core).is_ok(),
+            Some(Structured::Xml) => matches!(lenz_content::highlight::check_xml(core, &|| true), Some(Ok(()))),
+            None => false,
+        }
+    }
+
+    /// Why Format Selection cannot run now (`None`: it can).
+    pub(super) fn format_selection_disabled(&self) -> Option<&'static str> {
+        if let Some(why) = self.text_action_disabled(CommandId::FormatSelection) { return Some(why); }
+        let view = self.state.active().and_then(|tab| self.state.view(tab.id))?;
+        let snapshot = view.snapshot();
+        if view.tab().retrieved.is_some() { return Some("Not available in source a language server returned"); }
+        if snapshot.is_large() { return Some("Large file: not formatted"); }
+        if snapshot.language() == Some(Language::Env) { return Some("Environment files are not formatted: their values stay as typed"); }
+        if !view.tab().extra_selections().is_empty() { return Some("Format one selection at a time"); }
+        let Some(selection) = view.tab().selection().filter(|s| !s.range().is_empty()) else { return Some("Select the text to format first") };
+        let range = selection.range();
+        let head = snapshot.copy_range(range.start..range.end.min(range.start + 4096)).or_else(|| snapshot.copy_range(range.clone()));
+        match head {
+            Some(text) if text.trim().is_empty() => Some("The selection holds only blanks"),
+            Some(text) if selection_structured(snapshot.language(), &text).is_none() => Some("Format Selection formats JSON or XML; select a value or element"),
+            Some(_) => None,
+            None => Some("The selection is not in the text"),
+        }
+    }
 }
 
 /// Whether `file` is an ERB template.

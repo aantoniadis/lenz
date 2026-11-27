@@ -13,8 +13,10 @@ A native code editor, diff viewer, git client and merge tool, built in Rust.
 windows and terminal adapters. The desktop apps use [GPUI](https://github.com/zed-industries/zed);
 the terminal uses [Ratatui](https://ratatui.rs) and has no GUI dependencies.
 
-Lenz Code includes optional Vim editing and relative line numbers, offline JSON formatting, rich Markdown previews,
-and explorer speed search; [editor controls](docs/code/README.md#vim-editing-and-relative-line-numbers) lists the keys.
+Lenz Code includes optional Vim editing and relative line numbers, offline JSON and XML formatting (Ctrl+Alt+L formats
+the selected JSON or XML in any file), [project tabs](docs/code/README.md#project-tabs) that hold several projects in
+one window as tabs or side by side, rich Markdown previews and explorer speed search;
+[editor controls](docs/code/README.md#vim-editing-and-relative-line-numbers) lists the keys.
 On Linux, the [integrated terminal](docs/code/terminal.md) adds independent shell tabs,
 selected-draft paste and quoted file-path drops for SQL clients, scripts and terminal agents.
 

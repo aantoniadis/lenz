@@ -56,6 +56,7 @@ impl ReaderView {
             | Modal::ServerRuntime { path, .. } => (path.as_str(), None, false, 0),
             Modal::Branches { query, .. }
             | Modal::ScratchFiles { query, .. }
+            | Modal::Recent { query, .. }
             | Modal::Places { query, .. }
             | Modal::NewScratch { query, .. }
             | Modal::Siblings { query, .. }
@@ -156,6 +157,7 @@ impl ReaderView {
                 | Modal::ServerRuntime { path, .. } => path,
                 Modal::Branches { query, .. }
                 | Modal::ScratchFiles { query, .. }
+            | Modal::Recent { query, .. }
                 | Modal::Places { query, .. }
                 | Modal::NewScratch { query, .. }
                 | Modal::Siblings { query, .. }
@@ -195,6 +197,7 @@ impl ReaderView {
                     Modal::ServerRuntime { at, .. }
                     | Modal::Branches { at, .. }
                     | Modal::ScratchFiles { at, .. }
+                    | Modal::Recent { at, .. }
                     | Modal::Places { at, .. }
                     | Modal::NewScratch { at, .. }
                     | Modal::Siblings { at, .. } => *at = 0,

@@ -1,5 +1,5 @@
 //! Owned-display acceptance tool only. No application defaults or shipped input gates change.
-use gpui::{App, Entity, WindowHandle};
+use gpui::{App, Entity};
 use code_core::session::Config;
 use code_gui::ReaderView;
 use serde_json::{Value, json};
@@ -58,13 +58,12 @@ fn record(trace: &Rc<RefCell<File>>, label: &str, value: &Value, started: Instan
     }
 }
 fn observe(
-    handle: WindowHandle<ReaderView>,
+    view: Entity<ReaderView>,
     label: String,
     trace: Rc<RefCell<File>>,
     started: Instant,
     cx: &mut App,
 ) {
-    let view: Entity<ReaderView> = handle.root(cx).expect("created production window");
     let mut prior = snapshot(view.read(cx));
     record(&trace, &label, &prior, started);
     cx.observe(&view, move |view, cx| {
@@ -115,22 +114,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for label in ["a", "b"] {
             let state = root.join(format!("session-{label}"));
             let make = Rc::new(move |dark| config(&state, dark));
-            let handle = code_gui::open_acceptance_window_for_test(
+            let (handle, view) = code_gui::open_acceptance_window_for_test(
                 cx,
                 make,
                 Some(root.join(format!("{label}.txt"))),
             )
             .expect("production constructor must open the acceptance window");
             handle
-                .update(cx, |view, window, cx| {
-                    view.start_native_updates_for_test(cx);
-                    if !default_input { view.enable_draft_input_for_test(); }
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.start_native_updates_for_test(cx);
+                        if !default_input { view.enable_draft_input_for_test(); }
+                        view.focus_handle().focus(window, cx);
+                        cx.notify();
+                    });
                     window.set_window_title(&format!("Lenz foundation {label}"));
-                    view.focus_handle().focus(window, cx);
-                    cx.notify();
                 })
                 .expect("new window is live");
-            observe(handle, label.into(), trace.clone(), started, cx);
+            observe(view, label.into(), trace.clone(), started, cx);
         }
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -155,12 +156,11 @@ mod tests {
         prepare(&root).unwrap();
         let base = root.join("session-a");
         let make = Rc::new(move |dark| config(&base, dark));
-        let window = cx
+        let (window, view) = cx
             .update(|cx| {
                 code_gui::open_acceptance_window_for_test(cx, make, Some(root.join("a.txt")))
             })
             .unwrap();
-        let view = window.root(cx).unwrap();
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         let deadline = Instant::now() + Duration::from_secs(5);
         while view.read_with(&visual, |v, _| {

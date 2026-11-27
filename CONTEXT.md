@@ -137,6 +137,14 @@ The Branches and History panels of the **Overview**, where the user chooses what
 _Avoid_: source list (**Source** is one **Side**'s origin), history panel
 
 
+**Project Tab**:
+One project open in a Lenz Code window or terminal: its own folder, tabs, explorer, language servers and drafts, independent of the window's other project tabs. Shown one at a time, or **Side by Side** as columns.
+_Avoid_: workspace (that is the saved tab/place state of one project), independent view (the terminal's older name for it)
+
+**Format Selection**:
+Formatting only the selected JSON or XML in place, by the file's type or, in any other file, by what the selection starts with.
+_Avoid_: reformat (IntelliJ's verb)
+
 ## Relationships
 
 - A **Change Set** holds one or more **Comparisons**

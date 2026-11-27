@@ -80,7 +80,7 @@ struct Replay {
 impl Replay {
     fn new(cx: &mut TestAppContext, base: &Path, dark: bool) -> (Self, VisualTestContext) {
         let root = base.join("gui");
-        let window = cx.update(|cx| {
+        let (window, gui) = cx.update(|cx| {
             code_gui::open_acceptance_window_for_test(
                 cx,
                 Rc::new(move |_| config(&root, dark)),
@@ -88,7 +88,6 @@ impl Replay {
             )
             .unwrap()
         });
-        let gui = cx.update(|cx| window.root(cx).unwrap());
         let mut visual = VisualTestContext::from_window(window.into(), cx);
         let focus = gui.read_with(&visual, |v, _| v.focus_handle());
         visual.update(|w, cx| focus.focus(w, cx));

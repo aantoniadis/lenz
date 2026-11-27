@@ -13,12 +13,11 @@ impl Session {
     #[doc(hidden)]
     pub fn enable_text_input_for_test(&mut self) { self.text_input_enabled = true; }
 
-    pub(super) fn text_action_disabled(&self, id: CommandId) -> Option<&'static str> {
+    pub(super) fn text_action_disabled(&self, _id: CommandId) -> Option<&'static str> {
         let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id)) else { return Some("No loaded file is open") };
         if let Some(why) = view.edit_disabled() { return Some(why); }
         if matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Some("Show source to edit text"); }
         if !self.text_input_enabled { return Some("Text input is gated on this unvalidated platform/backend"); }
-        if id == CommandId::Cut && view.tab().selections().all(|selection| selection.range().is_empty()) { return Some("Select text to cut"); }
         None
     }
 
@@ -64,6 +63,8 @@ impl Session {
     /// The same text at every selection, as one transaction (typed text, Enter, Tab, bracketed paste).
     pub(super) fn insert_text(&mut self, text: String, kind: EditKind) -> Effect {
         if self.text_action_disabled(CommandId::Paste).is_some() { return Effect::default(); }
+        // A terminal's bracketed paste of lines a caret-only Copy or Cut took: pasted as lines, as Paste does.
+        if kind == EditKind::Paste && self.line_paste(&text).is_some() { return self.paste(text); }
         // One typed delimiter can wrap a selection or open a pair; a paste or a multi-character input is literal.
         if kind == EditKind::Typing && text.chars().count() == 1
             && let Some(effect) = self.typed_delimiter(&text)
@@ -184,18 +185,50 @@ impl Session {
         if self.text_action_disabled(CommandId::Cut).is_some() { return Effect::default(); }
         let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
         let Some(source) = self.state.source(tab) else { return Effect::default() };
+        // Carets alone (no text selected anywhere) cut their whole lines, as IntelliJ and VS Code do: each line once,
+        // with its ending; the last line, which has none, takes the line break before it, so no empty line is left.
+        if ranges.iter().all(std::ops::Range::is_empty) {
+            let mut lines: Vec<usize> = ranges.iter().map(|r| source.line_of(r.start)).collect();
+            lines.dedup();
+            let mut copied = String::new();
+            let mut removals: Vec<std::ops::Range<usize>> = Vec::new();
+            for line in lines {
+                let Some(range) = source.line_with_ending(line) else { continue };
+                copied.push_str(&source.copy_range(range.clone()).unwrap_or_default());
+                let last = range.end == source.len_bytes() && source.line_range(line).is_some_and(|r| r.end == range.end);
+                let range = if last && line > 0 { source.line_with_ending(line - 1).and_then(|p| source.line_range(line - 1).map(|c| c.end..p.end)).map_or(range.clone(), |ending| ending.start..range.end) } else { range };
+                match removals.last_mut() { Some(prev) if prev.end >= range.start => prev.end = prev.end.max(range.end), _ => removals.push(range) }
+            }
+            if removals.is_empty() { return Effect::default(); }
+            let edits = removals.into_iter().map(|range| TextEdit { range, text: "".into() }).collect();
+            let mut effect = self.edit(tab, expected, edits, EditKind::Delete);
+            if effect.repaint { self.line_clipboard = Some(copied.clone()); effect.copy = Some(copied); }
+            return effect;
+        }
         // The selections' text in source order, one per line, so pasting it elsewhere keeps them apart.
         let copied: Vec<String> = ranges.iter().filter(|range| !range.is_empty()).filter_map(|range| source.copy_range(range.clone())).collect();
         let text = copied.join("\n");
         let edits: Vec<_> = ranges.into_iter().map(|range| TextEdit { range, text: "".into() }).collect();
         let mut effect = self.edit(tab, expected, edits, EditKind::Replace);
-        if effect.repaint { effect.copy = Some(text); }
+        if effect.repaint { self.line_clipboard = None; effect.copy = Some(text); }
         effect
     }
 
     pub(super) fn paste(&mut self, text: String) -> Effect {
         if self.text_action_disabled(CommandId::Paste).is_some() { return Effect::default(); }
         let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
+        // What a caret-only Copy or Cut took is whole lines: with only carets, they go in above each caret's line
+        // (the caret stays where it was in its text), as IntelliJ and VS Code paste them.
+        if let Some(text) = self.line_paste(&text).filter(|_| ranges.iter().all(std::ops::Range::is_empty))
+            && let Some(source) = self.state.source(tab)
+        {
+            let ending = if text.ends_with('\n') { "" } else { first_ending(source) };
+            let lines_text: Arc<str> = format!("{text}{ending}").into();
+            let mut starts: Vec<usize> = ranges.iter().filter_map(|r| source.line_range(source.line_of(r.start)).map(|l| l.start)).collect();
+            starts.dedup();
+            let edits = starts.into_iter().map(|at| TextEdit { range: at..at, text: lines_text.clone() }).collect();
+            return self.edit(tab, expected, edits, EditKind::Paste);
+        }
         let edits = ranges.into_iter().map(|range| TextEdit { range, text: text.as_str().into() }).collect();
         self.edit(tab, expected, edits, EditKind::Paste)
     }
@@ -293,5 +326,24 @@ impl Session {
         let Some(buffer) = self.state.active().and_then(|t| t.buffer) else { return Effect::default() };
         if let Some(entry) = self.state.sources.buffers.get_mut(&buffer) { entry.read_only = on; if let Some(draft) = &mut entry.draft { draft.end_group(); } }
         Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+}
+
+impl Session {
+    /// The lines a caret-only Copy or Cut took, when `text` is them (terminals may hand a paste's line breaks back as
+    /// `\r` or `\r\n`): what Paste inserts as lines.
+    pub(super) fn line_paste(&self, text: &str) -> Option<String> {
+        let lines = self.line_clipboard.as_ref()?;
+        let plain = |t: &str| t.replace("\r\n", "\n").replace('\r', "\n");
+        (plain(lines) == plain(text)).then(|| lines.clone())
+    }
+}
+
+/// The line ending `source` uses first (`\n` when it has none yet), for a pasted line that came without one.
+fn first_ending(source: &crate::text::TextSnapshot) -> &'static str {
+    match source.line_with_ending(0).zip(source.line_range(0)).and_then(|(with, without)| source.range(without.end..with.end)) {
+        Some(ending) if ending == "\r\n" => "\r\n",
+        Some(ending) if ending == "\r" => "\r",
+        _ => "\n",
     }
 }

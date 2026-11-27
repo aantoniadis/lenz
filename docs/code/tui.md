@@ -393,7 +393,11 @@ Long messages end with an ellipsis: click the message or press Shift+F2 for a wr
 status snapshot; Ctrl+C copies the full text through the terminal clipboard. Routine server-memory
 samples stay in details. Narrow layouts keep actions available through F10. Esc dismisses a modal before underlying
 controls can receive input. Lenz Code modals also consume view-switching and quit keys. Ctrl-Q requests closure of the current independent view; F8 and Shift-F8 switch views. New Window
-in the palette opens an independent terminal view. Ctrl-Shift-Q requests closure of all views in terminals that report it.
+in the palette opens an independent terminal view. Independent views are the terminal's [project tabs](README.md#project-tabs):
+with two or more, the first row is the project strip (click a tab, its `×`, `+` or the layout button), Ctrl+Alt+] /
+Ctrl+Alt+[ step through them, **Open Folder in New Project Tab…** asks for a path, and **Projects Side by Side** shows
+as many as fit at least 36 cells wide as columns, each drawn as a terminal of its column's size. A click or wheel goes
+to the column under the pointer (a click also gives it the keys); a drag stays with the column it started in. Ctrl-Shift-Q requests closure of all views in terminals that report it.
 Before removing the last view of an unsaved draft, choose **Save** (`s`), **Discard** (`d`) or **Cancel** (Esc).
 All-view closure prepares every session before removing any; Cancel keeps every view and draft. An earlier
 explicit Save remains on disk even if another view cancels. Failed or uncertain Save cancels the pending close.

@@ -28,10 +28,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) fn source_path_label(path: &Path) -> String {
-    code_core::archive::Location::from_uri(path).map_or_else(|| path.display().to_string(), |location| location.display_path())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
     Tree,
@@ -52,6 +48,8 @@ pub(crate) enum Prompt {
     },
     Open,
     OpenFolder,
+    /// Open Folder in New Project Tab: the folder a new project view opens.
+    OpenFolderInProjectTab,
     TerminalPath,
     WorkspaceInput { rename: bool },
     RenameTerminal { id: code_core::terminal::Id },
@@ -120,6 +118,8 @@ pub(crate) enum Details {
     Reconcile,
     Replace,
     Recovered,
+    /// A project chosen while this tab has another open: here, in a new project tab, or not at all.
+    OpenProject,
     /// The folder-trust dialog: Escape stays restricted; Enter takes the focused choice (Stay Restricted unless Tab
     /// moved the focus just before). No letter trusts: without the kitty keyboard protocol, Alt+T arrives as Escape
     /// then T.
@@ -228,8 +228,14 @@ pub(crate) struct App {
     pub quit: bool,
     pub quit_all: bool,
     pub new_view: bool,
-    /// The folder the new view opens (Open in New Window on a worktree).
+    /// The folder the new view opens (Open in New Window on a worktree, Open Folder in New Project Tab).
     pub new_view_root: Option<PathBuf>,
+    /// A project-tab request for the runtime, which holds the views (next, previous, side by side).
+    pub project_request: Option<code_core::projects::Action>,
+    /// Where this view draws while it shares the terminal with other projects (see [`crate::projects`]).
+    pub(crate) offscreen: Option<ratatui::Terminal<ratatui::backend::TestBackend>>,
+    /// The Open Folder prompt's suggestions for the input last typed.
+    folder_suggestions: std::cell::RefCell<Option<(String, Vec<PathBuf>)>>,
     pub copy: Option<String>,
     pub copy_ticket: Option<code_core::session::ClipboardTicket>,
     /// Lenz Diff's terminal app, for the runtime to run in this terminal until it quits.
@@ -300,6 +306,9 @@ impl App {
             quit: false, quit_all: false,
             new_view: false,
             new_view_root: None,
+            project_request: None,
+            offscreen: None,
+            folder_suggestions: Default::default(),
             copy: None,
             copy_ticket: None,
             foreground: None,
@@ -919,6 +928,15 @@ impl App {
                 None => return self.dispatch(Command::Notice("Highlight a file or folder in the explorer".into())),
             },
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
+            InterfaceAction::Project(project) => match project {
+                code_core::projects::Action::New => { self.new_view = true; return; }
+                code_core::projects::Action::OpenFolder => Prompt::OpenFolderInProjectTab,
+                code_core::projects::Action::Close => { self.quit = true; return; }
+                code_core::projects::Action::Next | code_core::projects::Action::Previous | code_core::projects::Action::ToggleSideBySide => {
+                    self.project_request = Some(project);
+                    return;
+                }
+            },
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
                 let default_app = action == InterfaceAction::OpenWithDefaultApp;
                 match self.session.external_command(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
@@ -966,7 +984,11 @@ impl App {
                     Err(why) => return self.dispatch(Command::Notice(why.into())),
                 }
             }
-            InterfaceAction::OpenRecent => Prompt::RecentRoots,
+            InterfaceAction::OpenRecent => {
+                // The branches may have moved since they were read.
+                self.dispatch(Command::RefreshRecentBranches);
+                Prompt::RecentRoots
+            }
             InterfaceAction::FindFile => return self.open_navigation(Scope::Files),
             InterfaceAction::SearchEverywhere => return self.open_navigation(Scope::All),
             InterfaceAction::FindSymbol => return self.open_navigation(Scope::Symbols),
@@ -1173,6 +1195,9 @@ impl App {
             Chosen::Action(id) => self.run(id),
         }
     }
+    fn choose_open_project(&mut self,choice:code_core::projects::OpenChoice) {
+        if let Some(prompt)=self.session.open_project_prompt() { let ticket=prompt.ticket; self.dispatch(Command::ChooseOpenProject {ticket,choice}); }
+    }
     fn choose_external(&mut self,choice:code_core::external::Choice) {
         if let Some(prompt)=self.session.external_prompt() { self.dispatch(Command::ChooseExternal {ticket:prompt.ticket,choice}); }
     }
@@ -1200,6 +1225,7 @@ impl App {
                 Prompt::Details { kind: Details::External, .. } => self.choose_external(code_core::external::Choice::Cancel),
                 Prompt::Details { kind: Details::Reconcile, .. } => self.choose_reconcile(code_core::reconcile::Choice::KeepDraft),
                 Prompt::Details { kind: Details::Replace, .. } => self.choose_replace(code_core::save::ReplaceChoice::Cancel),
+                Prompt::Details { kind: Details::OpenProject, .. } => self.choose_open_project(code_core::projects::OpenChoice::Cancel),
                 Prompt::Details { kind: Details::Close, .. } => self.choose_close(code_core::close::Choice::Cancel),
                 Prompt::Details { kind: Details::Recovered, .. } => self.choose_recovery(code_core::recovery::Choice::Later),
                 Prompt::Details { kind: Details::Workspace, .. } => self.dispatch(Command::CancelWorkspaceEdit),
@@ -1353,13 +1379,17 @@ impl App {
                 .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&query)))
                 .cloned()
                 .map(|p| simple(p.file_name().unwrap_or_default().to_string_lossy().into_owned(), ChoiceTarget::Path(p))).collect(),
-            Prompt::RecentRoots => self
-                .session
-                .state()
-                .recent()
-                .iter()
-                .map(|p| simple(source_path_label(p), ChoiceTarget::Path(p.clone())))
-                .collect(),
+            Prompt::RecentRoots => self.recent_choices(&modal.input),
+            // Open Folder: the recent projects until something is typed, then the folders it names.
+            Prompt::OpenFolder | Prompt::OpenFolderInProjectTab if modal.input.trim().is_empty() => self.recent_choices(""),
+            Prompt::OpenFolder | Prompt::OpenFolderInProjectTab => {
+                let home = code_core::start::home();
+                self.folder_suggestions(&modal.input).into_iter().enumerate().map(|(i, path)| {
+                    let (name, location) = code_core::start::place(&path, home.as_deref());
+                    let exact = i == 0 && path == self.resolve_path(&modal.input);
+                    Choice { label: format!("{name}/"), detail: Some(if exact { format!("open · {location}") } else { location }), disabled: None, section: None, target: ChoiceTarget::Path(path) }
+                }).collect()
+            }
             Prompt::Themes => std::iter::once(simple(
                 "Follow system".into(),
                 ChoiceTarget::Theme("system".into()),
@@ -1431,6 +1461,8 @@ impl App {
         if matches!(
             modal.kind,
             Prompt::Places(_) | Prompt::NewScratch | Prompt::ServerRuntime | Prompt::Themes | Prompt::Branches | Prompt::BranchMenu { .. }
+                // These filter themselves: by name or location, or by the path typed.
+                | Prompt::RecentRoots | Prompt::OpenFolder | Prompt::OpenFolderInProjectTab
         ) || query.is_empty()
         {
             choices
@@ -1466,7 +1498,8 @@ impl App {
                 Prompt::ConfirmDelete { removal, from } => {
                     return format!("{} · Enter: {} · Esc cancels", self.session.delete_prompt(*removal, from), removal.label());
                 }
-                Prompt::OpenFolder => "Open folder · enter path",
+                Prompt::OpenFolder => "Open folder · type a path (~ and relative work)",
+                Prompt::OpenFolderInProjectTab => "Open folder in a new project tab · type a path",
                 Prompt::Compare(_) => code_core::external::COMPARISON_PROMPT,
                 Prompt::SqlMetadata => self.session.sql_metadata_prompt(),
                 Prompt::MavenProfiles => return self.session.maven_profiles_prompt(),
@@ -1474,7 +1507,7 @@ impl App {
                 Prompt::ServerRuntime => {
                     "Language server runtime · type a path or choose · Enter restarts the server with it"
                 }
-                Prompt::RecentRoots => "Recent folders",
+                Prompt::RecentRoots => "Open recent project · type to filter",
                 Prompt::Navigation => "Search Everywhere · Tab scope · ↑↓ select · Enter open",
                 Prompt::Search => "Search in Project",
                 Prompt::Find => "Find in file · Tab replaces · F3 next · Alt+Enter lists all · Alt+C/W/R options",
@@ -1754,6 +1787,16 @@ impl App {
         }
         // A delete confirmation takes Enter and Escape only: nothing types into it or reaches behind it.
         if matches!(kind, Prompt::ConfirmDelete { .. }) && !matches!(key.code, KeyCode::Enter | KeyCode::Esc) { return; }
+        if matches!(kind, Prompt::Details {kind:Details::OpenProject,..}) {
+            let choice=match key.code {
+                KeyCode::Char('t'|'T') | KeyCode::Enter if !control && !alt => Some(code_core::projects::OpenChoice::ThisTab),
+                KeyCode::Char('n'|'N') if !control && !alt => Some(code_core::projects::OpenChoice::NewTab),
+                KeyCode::Esc => Some(code_core::projects::OpenChoice::Cancel),
+                _=>None,
+            };
+            if let Some(choice)=choice { self.choose_open_project(choice); }
+            return;
+        }
         if matches!(kind, Prompt::Details {kind:Details::Replace,..}) {
             let choice=match key.code {
                 KeyCode::Char('r'|'R') if !control && !alt => Some(code_core::save::ReplaceChoice::Replace),
@@ -1956,6 +1999,25 @@ impl App {
                 self.focus = focus;
             }
             return;
+        }
+        // Open Recent Project and Open Folder: Ctrl+Enter opens the choice in a new project tab; Tab completes the
+        // chosen folder into the path typed so far.
+        if matches!(kind, Prompt::RecentRoots | Prompt::OpenFolder | Prompt::OpenFolderInProjectTab) {
+            let chosen = self.modal.as_ref().and_then(|m| self.choices().get(m.at).map(|c| c.target.clone()));
+            match (key.code, chosen) {
+                (KeyCode::Enter, Some(ChoiceTarget::Path(path))) if control => {
+                    self.close_modal();
+                    self.new_view = true;
+                    self.new_view_root = Some(path);
+                    return;
+                }
+                (KeyCode::Tab, Some(ChoiceTarget::Path(path))) if kind != Prompt::RecentRoots => {
+                    let typed = format!("{}/", code_core::start::tilde(&path, code_core::start::home().as_deref()).trim_end_matches('/'));
+                    if let Some(m) = self.modal.as_mut() { m.input = typed; m.at = 0; m.top = 0; }
+                    return;
+                }
+                _ => {}
+            }
         }
         match key.code {
             KeyCode::Enter => self.accept(),
@@ -2278,14 +2340,23 @@ impl App {
                     self.terminal_command(code_core::terminal::Command::Paths(vec![path]));
                 }
             }
-            Prompt::Open | Prompt::OpenFolder => {
-                let path = self.resolve_path(&input);
-                let target = if kind == Prompt::OpenFolder { code_core::open_path::Kind::Folder } else { code_core::open_path::Kind::File };
-                if input.is_empty() || target.validate(path.clone()).is_err() {
+            Prompt::Open | Prompt::OpenFolder | Prompt::OpenFolderInProjectTab => {
+                let chosen = match (&kind, self.choices().get(at).map(|c| c.target.clone())) {
+                    (Prompt::OpenFolder | Prompt::OpenFolderInProjectTab, Some(ChoiceTarget::Path(path))) => Some(path),
+                    _ => None,
+                };
+                // Nothing typed opens only a recent project chosen from the list; a typed path is taken exactly, spaces included.
+                let picked = chosen.is_some();
+                let path = chosen.unwrap_or_else(|| self.resolve_path(&input));
+                let target = if kind == Prompt::Open { code_core::open_path::Kind::File } else { code_core::open_path::Kind::Folder };
+                if (input.is_empty() && !picked) || target.validate(path.clone()).is_err() {
                     self.modal.as_mut().unwrap().error = Some("Enter an existing file or folder path".into());
                 } else {
                     self.close_modal();
-                    if kind == Prompt::OpenFolder {
+                    if kind == Prompt::OpenFolderInProjectTab {
+                        self.new_view = true;
+                        self.new_view_root = Some(path);
+                    } else if kind == Prompt::OpenFolder {
                         self.open_root(path);
                     } else {
                         self.dispatch(Command::Open(path));
@@ -2416,7 +2487,8 @@ impl App {
                 match choice.target {
                     ChoiceTarget::Information | ChoiceTarget::ServerRuntime(_) | ChoiceTarget::Keymap(_) => {}
                     ChoiceTarget::Action(id) => self.run(id),
-                    ChoiceTarget::Path(path) if kind == Prompt::RecentRoots => self.open_root(path),
+                    // Asks where when this tab already has a project open.
+                    ChoiceTarget::Path(path) if kind == Prompt::RecentRoots => self.dispatch(Command::OpenProject(path)),
                     ChoiceTarget::Path(path) if matches!(kind, Prompt::ScratchFiles(_)) => {
                         self.focus = Focus::Text;
                         self.dispatch(Command::OpenScratch(path));
@@ -2629,9 +2701,51 @@ impl App {
         true
     }
 
+    /// The recent projects whose name or location holds `query`, as choices: the name, then where it lives.
+    fn recent_choices(&self, query: &str) -> Vec<Choice> {
+        // The folder and branch marks: Nerd Font glyphs with file icons on, else the plain marks Lenz uses elsewhere
+        // (`⎇` as in the branch selector).
+        let (folder, branch) = if self.nerd_icons() { ("\u{f07b}", "\u{e725}") } else { ("⌂", "⎇") };
+        let home = code_core::start::home();
+        self.session.recent_projects(query)
+            .into_iter()
+            .map(|r| {
+                let path = code_core::start::tilde(&r.path, home.as_deref());
+                let detail = match r.branch { Some(b) => format!("{folder} {path}  {branch} {b}"), None => format!("{folder} {path}") };
+                Choice { label: r.name, detail: Some(detail), disabled: None, section: None, target: ChoiceTarget::Path(r.path) }
+            })
+            .collect()
+    }
+
+    /// The folders the Open Folder prompt suggests for `input`, read once per input (the prompt redraws often).
+    fn folder_suggestions(&self, input: &str) -> Vec<PathBuf> {
+        let mut cache = self.folder_suggestions.borrow_mut();
+        if let Some((typed, found)) = cache.as_ref() && typed == input { return found.clone(); }
+        let found = code_core::start::folder_suggestions(input, |typed| self.resolve_path(typed));
+        *cache = Some((input.to_owned(), found.clone()));
+        found
+    }
+
+    /// Run welcome-screen row `i`: its command, or its recent project or file opened.
+    fn run_start_item(&mut self, i: usize) {
+        match self.session.state().start_items().into_iter().nth(i) {
+            Some(StartItem::Command(id)) => self.run(id),
+            Some(StartItem::RecentFolder(root)) => self.open_root(root),
+            Some(StartItem::RecentFile(path)) => self.dispatch(Command::Open(path)),
+            None => {}
+        }
+    }
+
     fn key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.session.workspace_busy() {
             self.dispatch(Command::CancelWorkspaceEdit); return;
+        }
+        // The welcome screen: Up/Down choose a row, Enter runs it.
+        if self.modal.is_none() && !self.log_focus && self.focus == Focus::Text && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) && !self.session.state().start_items().is_empty()
+        {
+            if key.code == KeyCode::Enter { return self.run_start_item(self.session.state().start_selected()); }
+            return self.dispatch(Command::StepStart { forward: key.code == KeyCode::Down });
         }
         if self.log_focus && self.session.state().activity_log_shown() {
             if key_press(key).and_then(|press| self.session.key_command(&press)) == Some(CommandId::FindAction) { self.log_focus = false; return self.key(key); }
@@ -3370,6 +3484,10 @@ impl App {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=code_core::reconcile::Choice::ALL.get(i) { self.choose_reconcile(*choice); }
                 return;
             }
+            if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::OpenProject,..})) {
+                if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=code_core::projects::OpenChoice::ALL.get(i) { self.choose_open_project(*choice); }
+                return;
+            }
             if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Replace,..})) {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=code_core::save::ReplaceChoice::ALL.get(i) { self.choose_replace(*choice); }
                 return;
@@ -3656,13 +3774,7 @@ impl App {
                 }
                 // A start screen row: its command, or its recent folder opened.
                 if !drag && let Some(&(i, _)) = pane.start.iter().find(|(_, r)| r.contains(point)) {
-                    match self.session.state().start_items().into_iter().nth(i) {
-                        Some(StartItem::Command(id)) => self.run(id),
-                        Some(StartItem::RecentFolder(root)) => self.open_root(root),
-                        Some(StartItem::RecentFile(path)) => self.dispatch(Command::Open(path)),
-                        None => {}
-                    }
-                    return;
+                    return self.run_start_item(i);
                 }
                 if pane.source_view(self).is_none() {
                     continue;
@@ -4023,6 +4135,15 @@ impl App {
             (None,Some(Modal {kind:Prompt::Details {kind:Details::External,..},..})) => self.modal=None,
             _=>{}
         }
+        let open=self.session.open_project_prompt().map(|prompt|prompt.text());
+        match (open,&mut self.modal) {
+            (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::OpenProject,body,..},..})) => *body=text,
+            (Some(body),None) => self.prompt(Prompt::Details {title:"Open Project",body,logo:false,kind:Details::OpenProject}),
+            (None,Some(Modal {kind:Prompt::Details {kind:Details::OpenProject,..},..})) => self.modal=None,
+            _=>{}
+        }
+        // A project chosen for a new project tab: the runtime opens it.
+        if let Some(root)=self.session.take_project_tab_request() { self.new_view=true; self.new_view_root=Some(root); }
         let replace=self.session.save_as_prompt().map(|prompt|prompt.text());
         match (replace,&mut self.modal) {
             (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Replace,body,..},..})) => *body=text,

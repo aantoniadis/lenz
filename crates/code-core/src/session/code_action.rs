@@ -280,6 +280,7 @@ pub(super) fn sorted(mut edits: Vec<TextEdit>) -> Result<Vec<TextEdit>, &'static
 /// Why a template view's server may not apply `edits` (byte edits of the version it was asked about): see
 /// [`crate::template::Projection::check`]. `None` for any other document.
 pub(super) fn template_refusal(doc: &Document, edits: &[TextEdit]) -> Option<String> {
+    if let Some(why) = doc.erb_tag_refusal(edits) { return Some(why.to_owned()); }
     doc.embedded()?.check(edits, &[], &|r| doc.text().get(r).map(str::to_owned)).err()
 }
 

@@ -16,7 +16,6 @@ impl App {
                 | Prompt::LanguageServer
                 | Prompt::Themes
                 | Prompt::ConfirmDelete { .. }
-                | Prompt::RecentRoots
                 | Prompt::BranchMenu { .. }
         )
     }

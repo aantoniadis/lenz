@@ -133,6 +133,18 @@ impl Chord {
     }
 }
 
+/// A shortcut label as macOS spells it: Lenz's primary modifier is Command there (`Ctrl+Alt+L` runs on ⌘⌥L), so
+/// `Ctrl` reads `Cmd` and `Alt` reads `Opt`. Only the modifiers before the key change.
+pub fn mac_spelling(label: &str) -> String {
+    let mut parts: Vec<&str> = label.split('+').collect();
+    let key = parts.pop().unwrap_or_default();
+    let mut out: Vec<&str> = parts.into_iter().map(|m| match m { "Ctrl" => "Cmd", "Alt" => "Opt", other => other }).collect();
+    out.push(key);
+    // `Ctrl++` (the plus key) splits into an empty key: keep it.
+    let joined = out.join("+");
+    if label.ends_with("++") && !joined.ends_with("++") { format!("{joined}+") } else { joined }
+}
+
 fn display_key(key: &str) -> String {
     match key {
         "space" => "Space".into(),
@@ -204,6 +216,9 @@ const INTELLIJ: &[Preset] = &[
     (CommandId::NextProblem, &["F8"]),
     (CommandId::PreviousProblem, &["Shift+F8"]),
     (CommandId::FormatDocument, &["Ctrl+Alt+L"]),
+    // IntelliJ's Next / Previous Project Window.
+    (CommandId::NextProjectTab, &["Ctrl+Alt+]"]),
+    (CommandId::PreviousProjectTab, &["Ctrl+Alt+["]),
     (CommandId::OrganizeImports, &["Ctrl+Alt+O"]),
     (CommandId::Save, &["Ctrl+S"]),
     (CommandId::SaveAs, &["Ctrl+Shift+S"]),
@@ -289,6 +304,8 @@ const VS_CODE: &[Preset] = &[
     (CommandId::NextProblem, &["F8"]),
     (CommandId::PreviousProblem, &["Shift+F8"]),
     (CommandId::FormatDocument, &["Alt+Shift+F"]),
+    (CommandId::NextProjectTab, &["Ctrl+Alt+]"]),
+    (CommandId::PreviousProjectTab, &["Ctrl+Alt+["]),
     (CommandId::OrganizeImports, &["Alt+Shift+O"]),
     (CommandId::ShowProblems, &["Ctrl+Shift+M"]),
     (CommandId::Save, &["Ctrl+S"]),

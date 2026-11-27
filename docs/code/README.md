@@ -68,14 +68,32 @@ cargo test --release -p code-core -- --ignored --nocapture open_perf
 cargo test --release -p code-core --test semantics -- --ignored --nocapture   # real rust-analyzer, if installed
 ```
 
-Started with nothing to open (from home or `/`, as a desktop launcher does), a window shows **Open File…**, **Open
-Folder…**, the recent folders and the files recently opened without a folder; a click runs the command or opens the
-folder or file ([terminal](tui.md)).
+Started with nothing to open (from home or `/`, as a desktop launcher does), and in every new project tab, a window
+shows the **welcome screen**: **Open Folder…**, **Open Folder in New Project Tab…**, **Open File…** and **New File**
+with their shortcuts, then **Recent
+projects** and **Recent files**, each with a coloured badge of its initials, its name and where it lives (`~` for
+your home folder, shortened from the left when narrow), and a tip. A click, or ↑/↓ and Enter, runs the command or
+opens the project or file ([terminal](tui.md)). A terminal too short for all of it leaves out the name and tagline so the
+commands stay on screen.
+
+**Open Recent Folder…** shows **Open Recent Project**: each project's name, then its path after a folder icon and,
+for a git repository, its checked-out branch after a branch icon (`detached` and the commit when no branch is checked
+out). The branches are read from each repository's `HEAD` file off the UI thread when the window opens, when the recent
+list changes and each time the dialog opens; git itself is not run. Typing filters by name, path or branch. Enter opens
+the project in this project tab (asking first, This Tab or New Project Tab, when it already has another project open);
+**Ctrl+Enter** (Cmd+Enter on macOS) opens it in a new [project tab](#project-tabs) at once.
+The terminal shows the same on one line per project (`name  ⌂ ~/code/app  ⎇ main`, or Nerd Font folder and branch icons with File Icons on).
+In the terminal, **Open Folder…** and **Open Folder in New Project Tab…** list the recent projects until you type, then
+the folders the typed path names (`~/` and relative paths work; hidden folders once a `.` is typed): ↑/↓ choose, Tab
+completes the chosen folder into the path, Enter opens the chosen folder, and Ctrl+Enter opens it in a new project tab.
+The desktop's Open Folder… uses the system's folder chooser.
 
 If the desktop file dialog cannot open, **Open File…** and **Open Folder…** offer an in-window path prompt with the error and an Open button. Type or paste an existing path (relative to the project, or `~/` for home); Ctrl/Cmd+A replaces it, arrows move the caret, Enter opens and Escape cancels. A bad path keeps the prompt open without changing documents. Long search and path inputs scroll to keep the caret visible, including after Home and word movement.
 
-Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
-all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+Left/Right move by word (word ends and starts; Shift selects),
+Keys (the default IntelliJ keymap; see [Keymaps](#keymaps); in the macOS desktop app every Ctrl chord is pressed and
+shown with Cmd, and Alt with Option, as IntelliJ's macOS keymap does, so Format Document is ⌘⌥L): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
+all, Ctrl+C copy (with only a caret: its whole line), Ctrl+X cut (with only a caret: its whole line; a line copied or
+cut this way pastes back as a whole line above the caret's line), Shift+arrows/Home/End select, Ctrl+Left/Right move by word (word ends and starts; Shift selects),
 Ctrl+Shift+Home/End select to the file's start/end, Home goes to the first non-blank character and then the line start
 while editing, Ctrl+Up/Down scroll a row (macOS: Cmd+Left/Right go to the line's ends and Cmd+Up/Down to the file's;
 Option+Left/Right are Back/Forward unless **macOS Word Motion** is on, below), Ctrl+Backspace / Ctrl+Delete delete to the word
@@ -175,12 +193,55 @@ absolute line number. Wrapped continuation rows stay blank; clicking numbers and
 use the actual source line. The setting is independent of Vim and persists. Vim also accepts `:set rnu`
 and `:set nornu`.
 
-### JSON formatting
+### Project tabs
 
-**Format Document** (Ctrl+Alt+L) formats JSON offline using the file's resolved indentation, without a server
-or external tool. It changes only whitespace: key order, duplicate keys, numeric spellings, string escapes,
-line-ending choices and the presence of a final newline remain intact. Invalid JSON stays unchanged.
-Formatting is one Undo operation; project **Format on Save** uses the same formatter before writing.
+One window (or terminal) can hold several projects, each in its own **project tab** with its own folder, tabs,
+explorer, language servers, terminal sessions and drafts. Projects never share or synchronize documents.
+
+- **File → Project Tabs → New Project Tab** opens one on the start screen; **Open Folder in New Project Tab…** (also
+  on the welcome screen) asks for a folder (the GUI's folder chooser, a typed path in the terminal) and opens it there.
+- Choosing a project in **Open Recent Project** while this tab has another one open asks **Open Project: This Tab /
+  New Project Tab / Cancel** (`t` or Enter, `n`, Esc); in an empty tab, or for the project already open, it just
+  opens. Ctrl+Enter there goes straight to a new project tab.
+- Once there are two, a strip above the toolbar shows a tab per project: in the desktop app the tabs share the
+  width, each reading `project – ~/path/to/the/shown/file` (the folder when no file is shown), as IntelliJ's project
+  windows do; in the terminal each shows its number and folder name. `●` marks unsaved work and `×` closes it.
+  Click a tab to switch; `+` opens a new project tab.
+- **Next / Previous Project Tab** (Ctrl+Alt+] / Ctrl+Alt+[ in both keymaps, IntelliJ's project-window chords) step
+  through them; the terminal's F8 / Shift+F8 do the same.
+- **Projects Side by Side** (the strip's right-hand button, or the menu toggle) shows 2, 3, 4… projects as equal
+  columns. The active project has the keys; clicking in a column (or stepping) moves them. Each column lays itself
+  out as a window of that width would, so narrow columns use the narrow layouts. As many projects as fit at
+  least 36 character cells each are shown, keeping the active one in view; the others stay on the strip.
+- **Close Project Tab** (or `×`) asks about that project's unsaved work only (Save, Discard or Cancel) and closes it;
+  the last project closes the window. **Close Window** asks about every project in the window.
+
+With one project there is no strip and the window looks and behaves exactly as before. The open project tabs are not
+restored after a restart; each project restores its own tabs and places as a single-project window does.
+
+### Formatting JSON and XML
+
+**Format Document** (Ctrl+Alt+L, **Cmd+Opt+L** on macOS; VS Code keymap Alt+Shift+F) formats JSON and XML offline using the file's resolved
+indentation, without a server or external tool:
+
+- **JSON** changes only whitespace: key order, duplicate keys, numeric spellings, string escapes, line-ending choices
+  and the presence of a final newline remain intact. Invalid JSON stays unchanged.
+- **XML** re-indents element-only content and changes nothing else: tags (attributes and their own line breaks),
+  text, comments, CDATA, processing instructions and the doctype keep their bytes. An element holding text or CDATA
+  (mixed or text-only content) or marked `xml:space="preserve"` keeps everything between its tags as written.
+  Malformed XML stays unchanged; a document declaring entities is left alone (the bounded validator cannot check it).
+- **A plain-text document** (an untitled document, a `.txt`) whose text starts like JSON or XML formats as that when
+  asked. Format on Save never guesses: it formats only JSON and XML files.
+
+**Format Selection** formats only the selected text, as JSON or XML: the file's own format for a JSON or XML file,
+otherwise what the selection starts with (`{` or `[`, or `<`). Ctrl+Alt+L runs it whenever the selection holds
+well-formed JSON or XML, as IntelliJ's Reformat Code formats a selection, so pasting a one-line JSON value anywhere
+(a Markdown note, a Ruby file, a scratch file), selecting it and pressing Ctrl+Alt+L expands it in place. Surrounding
+blanks stay outside, and each new line is indented like the line the selection starts on. With any other selection
+(several selections, or text that is not well-formed JSON or XML) Ctrl+Alt+L formats the document as before, and the
+**Format Selection** menu entry or Find Action says why it cannot run or what is malformed.
+
+Formatting is one Undo operation; project **Format on Save** uses the same formatters before writing.
 Object keys, string values, escapes, numbers, literals and structural punctuation have distinct syntax captures.
 
 ### SQL dialect
@@ -200,6 +261,22 @@ For table and column suggestions, open **SQL dialect** from the status label, th
 Choose **Configure SQL Metadata…**: the GUI offers a file chooser for an existing DuckDB database; the terminal
 asks for its absolute path. PostgreSQL asks for an existing libpq service name. Then choose **Connect SQL Metadata**
 from the SQL menu. Choosing a source alone never connects or executes your SQL.
+
+### YAML read through ERB
+
+Rails reads several YAML files through ERB first (`config/database.yml`, `cable.yml`, `storage.yml` and others), so
+they hold tags such as `<% if ENV["CI"] %>`, `<%= ENV.fetch("DB_HOST") %>` and `<% end %>` that are not YAML. In any
+`.yml`/`.yaml` file holding ERB tags, Lenz reads the YAML around them and paints the tags as ERB: their delimiters as
+tags and their code as Ruby (all of a file's tags read together, so an `if` and the `end` in a later tag are one
+statement). The tags are not reported as YAML errors, and the structure, highlighting and folds after them stay.
+
+For that, the YAML grammar and yaml-language-server read a masked copy of the file: a tag alone on its line becomes a
+comment, a tag inside a line (`pool: <%= … %>`) a plain value of the same length, and every other character stays
+where it is, so problems, completion and hover land on the right lines and columns. A language-server edit that
+would change a tag (formatting, a quick fix, a completion) is refused whole, with the reason. Format on Save leaves
+such files as typed; Format Document still formats them where no tag is touched. `<%%` stays ERB's literal `<%`,
+and an unclosed `<%` is left as text, so its YAML error shows. Files named `*.yml.erb` are ERB templates (see Ruby
+and Rails assistance) and are not affected.
 
 ### Environment files
 
@@ -261,8 +338,9 @@ closing tag creates an indented line, and attribute quotes pair in tag context. 
 and refuses content that would make an illegal XML comment. The validator runs locally without resolving external
 entities. Documents declaring internal entities keep highlighting and folding but show an informational validation
 limit; they are not passed to the parser's unbounded entity expander or marked malformed. Save preserves the
-original encoding. This pass provides no schema completion, XML language server or
-formatter; mixed-content whitespace stays under the author's control.
+original encoding. This pass provides no schema completion or XML language server;
+[Format Document](#formatting-json-and-xml) re-indents element-only content and leaves mixed-content whitespace
+under the author's control.
 
 ### CSV tables
 

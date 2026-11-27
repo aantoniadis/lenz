@@ -1,13 +1,6 @@
 //! Archive presentation uses the same explorer rows and editable tabs as ordinary files.
 use super::*;
 
-pub(super) fn source_path_label(path: &std::path::Path) -> String {
-    code_core::archive::Location::from_uri(path).map_or_else(
-        || path.display().to_string(),
-        |location| location.display_path(),
-    )
-}
-
 impl ReaderView {
     pub(super) fn explorer_title(&self) -> String {
         let state = self.session.state();

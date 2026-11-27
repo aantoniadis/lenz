@@ -124,6 +124,8 @@ pub struct Document {
     templates: std::sync::OnceLock<Option<Arc<crate::template::Views>>>,
     /// This document as one embedded language of a template sees it: what its server is sent, and the map back.
     embedded: Option<Arc<crate::template::Projection>>,
+    /// YAML holding ERB tags (Rails' `config/*.yml`): the masked copy its language server reads, built once.
+    yaml_mask: std::sync::OnceLock<Option<Arc<str>>>,
 }
 
 impl Document {
@@ -179,11 +181,12 @@ impl Document {
             version,
             protocol_lines: std::sync::OnceLock::new(),
             write_baseline: None, archive_baseline: None,
-            templates: std::sync::OnceLock::new(),
+            templates: std::sync::OnceLock::new(), yaml_mask: std::sync::OnceLock::new(),
             embedded: None,
         };
         // A template's projections are built here, off the UI thread, like the load itself.
         let _ = document.templates();
+        let _ = document.yaml_masked();
         document
     }
 
@@ -213,6 +216,7 @@ impl Document {
         Arc::make_mut(&mut document.source).language = highlight::detect(document.source(), document.line(0));
         // A template's projections are built here, off the UI thread, like the load itself.
         let _ = document.templates();
+        let _ = document.yaml_masked();
         document
     }
 
@@ -228,14 +232,14 @@ impl Document {
         let lines = line_starts.len() - usize::from(text.ends_with('\n'));
         let large = if source.loaded_version == Some(version) { source.large }
             else { source.large || text.len() > LARGE_BYTES || lines > LARGE_LINES };
-        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new(), write_baseline: None, archive_baseline: None, templates: std::sync::OnceLock::new(), embedded: None }
+        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new(), write_baseline: None, archive_baseline: None, templates: std::sync::OnceLock::new(), yaml_mask: std::sync::OnceLock::new(), embedded: None }
     }
 
     /// This version of a template as `projection` presents it: the same identity, version and text (shared), sent to
     /// its server as the projection.
     pub(crate) fn embedded_view(&self, projection: Arc<crate::template::Projection>) -> Self {
         Self { source: self.source.clone(), version: self.version, text: self.text.clone(), line_starts: self.line_starts.clone(), large: self.large,
-            protocol_lines: self.protocol_lines.clone(), write_baseline: None, archive_baseline: None, templates: std::sync::OnceLock::new(), embedded: Some(projection) }
+            protocol_lines: self.protocol_lines.clone(), write_baseline: None, archive_baseline: None, templates: std::sync::OnceLock::new(), yaml_mask: std::sync::OnceLock::new(), embedded: Some(projection) }
     }
 
     /// An ERB or Haml template's embedded-language views (`None`: not a template, a large file, or itself a view).
@@ -253,7 +257,23 @@ impl Document {
 
     /// The text a language server is sent for this document: a view's projection, else the text itself.
     pub fn wire_text(&self) -> &Arc<str> {
-        match &self.embedded { Some(p) => p.generated().text(), None => &self.text }
+        match &self.embedded { Some(p) => p.generated().text(), None => self.yaml_masked().unwrap_or(&self.text) }
+    }
+
+    /// YAML holding ERB tags, masked so its language server reads YAML: the same length and character positions,
+    /// each tag a comment line or a plain scalar (see [`lenz_content::highlight::yaml_erb_masked`]).
+    pub fn yaml_masked(&self) -> Option<&Arc<str>> {
+        if self.language() != Some(Language::Yaml) || self.large { return None; }
+        self.yaml_mask.get_or_init(|| lenz_content::highlight::yaml_erb_masked(&self.text).map(Arc::from)).as_ref()
+    }
+
+    /// Why a language server's `edits` are refused: one changes an ERB tag of YAML (its server never saw the tag,
+    /// only the mask in its place). An insertion at a tag's edge leaves it whole.
+    pub fn erb_tag_refusal(&self, edits: &[crate::text::TextEdit]) -> Option<&'static str> {
+        self.yaml_masked()?;
+        let tags = lenz_content::highlight::yaml_erb_tags(&self.text);
+        let touches = |r: &std::ops::Range<usize>| tags.iter().any(|t| if r.is_empty() { t.start < r.start && r.start < t.end } else { r.start < t.end && t.start < r.end });
+        edits.iter().any(|e| touches(&e.range)).then_some("the edit would change an ERB tag (<% … %>), which the YAML language server does not read")
     }
 
     /// The language a server serves this document as: a view's embedded language; none for a template itself.
@@ -323,7 +343,7 @@ impl Document {
             write_baseline: self.write_baseline.clone(),
             archive_baseline: self.archive_baseline.clone(),
             // Another name may be another template language (or none): its views are built for it.
-            templates: std::sync::OnceLock::new(),
+            templates: std::sync::OnceLock::new(), yaml_mask: std::sync::OnceLock::new(),
             embedded: None,
         }
     }

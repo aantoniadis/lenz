@@ -76,6 +76,11 @@ fn validate(text: &str, starts: &[usize], current: &dyn Fn() -> bool) -> Option<
     }
 }
 
+pub(super) fn check(text: &str, current: &dyn Fn() -> bool) -> Option<Result<(), SyntaxError>> {
+    let starts = crate::lines::line_starts(text);
+    validate(text, &starts, current).map(|errors| errors.into_iter().next().map_or(Ok(()), Err))
+}
+
 pub(super) fn parse(text: &str, current: &dyn Fn() -> bool, want: Want) -> Option<Syntax> {
     let starts = crate::lines::line_starts(text);
     let errors = validate(text, &starts, current)?;

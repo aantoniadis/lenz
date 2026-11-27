@@ -10,7 +10,10 @@ pub(super) fn format(doc: &Document, unit: &IndentUnit, cancelled: &AtomicBool) 
     }
 }
 
-fn whitespace(text: &str, indent: &str, cancelled: &AtomicBool) -> Result<String, String> {
+fn whitespace(text: &str, indent: &str, cancelled: &AtomicBool) -> Result<String, String> { whitespace_with(text, indent, "\n", cancelled) }
+
+/// [`whitespace`], with `preferred` as the line ending when `text` has none of its own (a pasted one-line value).
+pub(super) fn whitespace_with(text: &str, indent: &str, preferred: &str, cancelled: &AtomicBool) -> Result<String, String> {
     let check = || if cancelled.load(Ordering::Relaxed) { Err("cancelled".to_owned()) } else { Ok(()) };
     check()?;
     if text.len() > crate::document::LARGE_BYTES { return Err("large file: not formatted".into()); }
@@ -23,7 +26,7 @@ fn whitespace(text: &str, indent: &str, cancelled: &AtomicBool) -> Result<String
         b'\n' => Some(if i > 0 && bytes[i - 1] == b'\r' { "\r\n" } else { "\n" }),
         _ => None,
     });
-    let fallback = endings.clone().next().unwrap_or("\n");
+    let fallback = endings.clone().next().unwrap_or(preferred);
     let mut lines = 1;
     let mut newline = |out: &mut String, depth: usize| -> Result<(), String> {
         check()?;

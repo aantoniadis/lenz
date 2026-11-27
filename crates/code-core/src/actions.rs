@@ -83,6 +83,8 @@ pub enum InterfaceAction {
     NewWindow,
     CloseWindow,
     QuitAll,
+    /// A project-tab request for the window's host (see [`crate::projects`]).
+    Project(crate::projects::Action),
     FocusBreadcrumbs,
     ToggleExplorer,
     WorkspaceRoot,
@@ -231,6 +233,10 @@ impl Session {
             CommandId::CloseWindow => return CatalogAction::Interface(InterfaceAction::CloseWindow),
             CommandId::QuitAll => return CatalogAction::Interface(InterfaceAction::QuitAll),
             CommandId::NewWindow => return CatalogAction::Interface(InterfaceAction::NewWindow),
+            CommandId::NewProjectTab | CommandId::OpenFolderInProjectTab | CommandId::CloseProjectTab | CommandId::NextProjectTab | CommandId::PreviousProjectTab | CommandId::ProjectsSideBySide => match id.project_action() {
+                Some(action) => return CatalogAction::Interface(InterfaceAction::Project(action)),
+                None => return CatalogAction::Disabled("Not a project-tab command"),
+            },
             CommandId::FocusBreadcrumbs => return CatalogAction::Interface(InterfaceAction::FocusBreadcrumbs),
             CommandId::ToggleExplorer => return CatalogAction::Interface(InterfaceAction::ToggleExplorer),
             CommandId::WorkspaceRoot => return CatalogAction::Interface(InterfaceAction::WorkspaceRoot),
@@ -344,7 +350,9 @@ impl Session {
             CommandId::Completion => Command::Complete,
             CommandId::ParameterInfo => Command::ParameterInfo,
             CommandId::QuickFix => Command::QuickFix,
+            CommandId::FormatDocument if self.format_selection_routes() => Command::Format(crate::session::FormatKind::Selection),
             CommandId::FormatDocument => Command::Format(crate::session::FormatKind::Format),
+            CommandId::FormatSelection => Command::Format(crate::session::FormatKind::Selection),
             CommandId::OrganizeImports => Command::Format(crate::session::FormatKind::OrganizeImports),
             CommandId::NextProblem => Command::StepProblem(true),
             CommandId::PreviousProblem => Command::StepProblem(false),
@@ -475,10 +483,12 @@ pub enum CommandGroup {
     Metadata,
     Dialect,
     Keybindings,
+    /// Project tabs: several projects in one window, as tabs or side by side.
+    Projects,
 }
 
 impl CommandGroup {
-    pub const ALL: [Self; 36] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::Git, Self::LanguageServers, Self::Sql, Self::Application, Self::Recovery, Self::FileLocation, Self::New, Self::Tabs, Self::Compare, Self::Layout, Self::Appearance, Self::Folding, Self::Hints, Self::Explorer, Self::Csv, Self::Annotations, Self::Branches, Self::GitCompare, Self::Changes, Self::Bookmarks, Self::CodeNavigation, Self::Problems, Self::FindOptions, Self::Selections, Self::Lines, Self::EditingSettings, Self::ServerSetup, Self::Metadata, Self::Dialect, Self::Keybindings, Self::Terminal];
+    pub const ALL: [Self; 37] = [Self::File, Self::Projects, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::Git, Self::LanguageServers, Self::Sql, Self::Application, Self::Recovery, Self::FileLocation, Self::New, Self::Tabs, Self::Compare, Self::Layout, Self::Appearance, Self::Folding, Self::Hints, Self::Explorer, Self::Csv, Self::Annotations, Self::Branches, Self::GitCompare, Self::Changes, Self::Bookmarks, Self::CodeNavigation, Self::Problems, Self::FindOptions, Self::Selections, Self::Lines, Self::EditingSettings, Self::ServerSetup, Self::Metadata, Self::Dialect, Self::Keybindings, Self::Terminal];
 
     /// Every group, each menu followed by its submenus: the order the full command menu lists them in.
     pub fn nested() -> Vec<Self> {
@@ -510,6 +520,7 @@ impl CommandGroup {
             Self::Recovery | Self::FileLocation => Some(Self::File),
             Self::New => Some(Self::File),
             Self::Tabs => Some(Self::File),
+            Self::Projects => Some(Self::File),
             Self::Compare => Some(Self::File),
             Self::Layout => Some(Self::View),
             Self::Appearance => Some(Self::View),
@@ -552,6 +563,7 @@ impl CommandGroup {
             Self::FileLocation => "File Location",
             Self::New => "New",
             Self::Tabs => "Tabs",
+            Self::Projects => "Project Tabs",
             Self::Compare => "Compare",
             Self::Layout => "Layout",
             Self::Appearance => "Editor Appearance",
@@ -580,6 +592,20 @@ impl CommandGroup {
 }
 
 impl CommandId {
+    /// The project-tab request this command makes of the window's host.
+    pub fn project_action(self) -> Option<crate::projects::Action> {
+        use crate::projects::Action as A;
+        Some(match self {
+            Self::NewProjectTab => A::New,
+            Self::OpenFolderInProjectTab => A::OpenFolder,
+            Self::CloseProjectTab => A::Close,
+            Self::NextProjectTab => A::Next,
+            Self::PreviousProjectTab => A::Previous,
+            Self::ProjectsSideBySide => A::ToggleSideBySide,
+            _ => return None,
+        })
+    }
+
     /// Every command in the full command menu's order: grouped as the menus group them ([`CommandGroup::nested`]),
     /// in catalog order within a group.
     pub fn grouped() -> Vec<Self> {
@@ -596,6 +622,7 @@ impl CommandId {
             Self::RecoverDrafts | Self::RecheckSave | Self::ConfirmRecheckedSave | Self::SaveWithoutFormatting | Self::ResolveExternalChange => return G::Recovery,
             Self::CopyPath | Self::CopyPathLine | Self::CopyReference | Self::OpenInEditor | Self::OpenWithDefaultApp => return G::FileLocation,
             Self::NewWindow => return G::New,
+            Self::NewProjectTab | Self::OpenFolderInProjectTab | Self::CloseProjectTab | Self::NextProjectTab | Self::PreviousProjectTab | Self::ProjectsSideBySide => return G::Projects,
             Self::ReadOnlyMode => return G::EditingSettings,
             Self::NewDocument | Self::NewExplorerFile | Self::NewExplorerFolder | Self::NewScratch | Self::ScratchFiles => return G::New,
             Self::CloseAllTabs | Self::CloseOtherTabs | Self::CloseTabsLeft | Self::CloseTabsRight | Self::PinTab => return G::Tabs,
@@ -624,6 +651,7 @@ impl CommandId {
             _ => {}
         }
         match self {
+            Self::NewProjectTab | Self::OpenFolderInProjectTab | Self::CloseProjectTab | Self::NextProjectTab | Self::PreviousProjectTab | Self::ProjectsSideBySide => G::File,
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveWithoutFormatting | Self::SaveAs | Self::NewDocument | Self::RecoverDrafts | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::NewScratch | Self::ScratchFiles | Self::CloseAllTabs | Self::CloseOtherTabs | Self::CloseTabsLeft | Self::CloseTabsRight | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::CopyReference | Self::OpenInEditor | Self::OpenWithDefaultApp
             | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison
@@ -654,7 +682,7 @@ impl CommandId {
             | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections
             | Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown
             | Self::DuplicateLinesUp | Self::DuplicateLinesDown | Self::DeleteLine
-            | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion | Self::ParameterInfo | Self::QuickFix | Self::FormatDocument | Self::OrganizeImports => G::Selection,
+            | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion | Self::ParameterInfo | Self::QuickFix | Self::FormatDocument | Self::FormatSelection | Self::OrganizeImports => G::Selection,
             Self::InstallServer | Self::StartServerInstall | Self::CancelServerInstall | Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime | Self::MavenProfiles | Self::IncludeInBuild
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer | Self::TrustProjectTools | Self::UntrustProjectTools | Self::FolderTrust => G::LanguageServers,
