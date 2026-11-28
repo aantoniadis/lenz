@@ -345,16 +345,16 @@ def exercise(probe, fixture, original, args):
     if fixture.read_bytes() != original:
         raise RuntimeError('reading, navigation or copy changed fixture bytes')
     # New Window creates an independent terminal view; F8 returns to the original document.
+    # The empty view shows the start screen; 0.0.24 replaced the footer's "View 2/2" with a project strip.
     probe.send(b'\x1b[21~New Window\r')
-    probe.expect('View 2/2')
+    probe.expect('Recent files')
     probe.quiet()
     if 'READER_LINE_' in probe.screen.text():
         raise RuntimeError('new independent view inherited the first view document')
     probe.send(b'\x1b[19~')
-    probe.expect('View 1/2')
     probe.expect('READER_LINE_000000')
     probe.send(b'\x1b[19~')
-    probe.expect('View 2/2')
+    probe.expect('Recent files')
     probe.send(b'\x11')
     probe.expect('READER_LINE_000000')
     checks.append('New Window and F8 independent sessions; Ctrl-Q closes one view')
